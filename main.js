@@ -771,6 +771,37 @@ function updateTotals() {
     }
   }
 }
+async function resetProgress(confirmFirst = true) {
+  if (confirmFirst && !confirm('Reset everything?')) return;
+
+  // reset state
+  totalXp = 0;
+  dailyXp = 0;
+  placementsPlayed = 0;
+  placementsScores = [];
+  isInPlacements = true;
+  lp = 0;
+  rankIndex = 0;
+  history = [];
+  historyPageIndex = 0;
+
+  // reset timer
+  if (timerInterval) clearInterval(timerInterval);
+  startedAt = null;
+  isPaused = false;
+  pauseStartedAt = null;
+  pausedDuration = 0;
+
+  // reset UI
+  const p = $('pauseBtn');
+  if (p) { p.disabled = true; p.textContent = 'Pause'; }
+  const t = $('timerDisplay');
+  if (t) t.textContent = 'Not started';
+
+  updateTotals();
+  updateAnalytics();
+  await saveUsers();
+}
 
 // Update the progress bar width based on current total XP or LP
 function updateProgressBar() {
@@ -997,6 +1028,9 @@ window.addEventListener('DOMContentLoaded', async () => {
       }
     });
   }
+  $('resetBtn')?.addEventListener('click', async () => {
+  await resetProgress(true);
+});
   if (signOutBtn) {
     signOutBtn.addEventListener('click', async () => {
       await logoutUser();
