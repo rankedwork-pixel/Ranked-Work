@@ -1,65 +1,77 @@
-// Ranked Work application logic (8‑Tier Edition)
-// This script implements a simple productivity tracker. It stores a list of tasks,
-// tracks elapsed time for the day's work, awards XP based on how fast you finish,
-// and assigns a rank based on cumulative XP. All persistent data (total XP) is
-// stored in localStorage.
+// Ranked Work application logic (multi‑user edition)
+// This script implements a productivity tracker with ranked progression, placement
+// matches, LP system and analytics. It has been extended to support multiple
+// user profiles with login and registration, basic password storage, and a
+// lightweight friends system. User data is persisted in localStorage.
 
 // Helper for selecting elements by id
 const $ = (id) => document.getElementById(id);
 
-// Application state
+// ------------------------------------------------------------
+// Supabase configuration
+// ------------------------------------------------------------
+// To connect this app to Supabase, set SUPABASE_URL and SUPABASE_ANON_KEY
+// below. If these values are left empty, the app will fall back to
+// localStorage for persistence. When configured, the app will use
+// Supabase Auth for login/register and persist user profiles, history
+// and friend relationships in your Supabase database. See the README
+// for table definitions. NOTE: Do not commit your secret service role
+// key; only use the public anon key here.
+
+const SUPABASE_URL = '';
+const SUPABASE_ANON_KEY = '';
+let supabase = null;
+let useSupabase = false;
+
+try {
+  // If the Supabase library has loaded and configuration is provided,
+  // initialize a client. The CDN script included in index.html exposes
+  // a global `supabase` object. If either value is empty or the
+  // library is not present, `useSupabase` remains false and the app
+  // continues to use localStorage.
+  if (typeof window !== 'undefined' && window.supabase && SUPABASE_URL && SUPABASE_ANON_KEY) {
+    supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+      auth: {
+        autoRefreshToken: true,
+        persistSession: true
+      }
+    });
+    useSupabase = true;
+  }
+} catch (err) {
+  useSupabase = false;
+}
+
+
+// ------------------------------------------------------------
+// Global state
+// ------------------------------------------------------------
+// A map of all users keyed by username. Each user object stores
+// persistent fields: password, totalXp, placementsPlayed, placementsScores,
+// lp, rankIndex, history (array), and friends (array of usernames).
+let users = {};
+// The name of the currently logged‑in user (null if no user logged in)
+let currentUserName = null;
+// Application state for the current session. These variables mirror fields
+// stored for each user and are loaded when a user logs in.
 let tasks = [];
 let startedAt = null;
 let timerInterval = null;
 let pausedDuration = 0;
-// Track pause state and the timestamp when pausing started. When isPaused is true,
-// the timer is not advancing and the pause duration will be subtracted from total time.
 let isPaused = false;
 let pauseStartedAt = null;
-// XP awarded for the current day. In the new system this is used to assess
-// performance but does not directly contribute to rank placement after the
-// initial placement phase.
 let dailyXp = 0;
-
-// Placement and LP (League Points) state. We adopt a system similar to
-// competitive games: users play a fixed number of placement games to
-// determine their starting rank, after which daily performance grants or
-// deducts LP. When LP reaches 100 you rank up; below 0 you rank down.
-const placementsCount = 10;
-let placementsPlayed = parseInt(localStorage.getItem('placementsPlayed')) || 0;
+let totalXp = 0;
+let placementsPlayed = 0;
 let placementsScores = [];
-try {
-  const ps = localStorage.getItem('placementsScores');
-  if (ps) {
-    placementsScores = JSON.parse(ps);
-    if (!Array.isArray(placementsScores)) placementsScores = [];
-  }
-} catch {
-  placementsScores = [];
-}
-// LP value ranges from 0–99. Promotions occur when lp >= 100; demotions
-// occur when lp < 0. We persist lp and current rank index in localStorage.
-let lp = parseInt(localStorage.getItem('lp')) || 0;
-let rankIndex = parseInt(localStorage.getItem('rankIndex')) || 0;
-// Determine if we are still in placements. Once placementsPlayed >=
-// placementsCount, isInPlacements becomes false.
-let isInPlacements = placementsPlayed < placementsCount;
-// We continue to track total XP for analytics, although it no longer
-// determines the rank. Default to 0 if not present.
-let totalXp = parseInt(localStorage.getItem('totalXp')) || 0;
-
-// Load analytics history from localStorage. Each entry stores
-// { date: string (ISO), hours: number, tasks: number, xp: number }
+let lp = 0;
+let rankIndex = 0;
 let history = [];
-try {
-  const stored = localStorage.getItem('rankedHistory');
-  if (stored) {
-    history = JSON.parse(stored);
-    if (!Array.isArray(history)) history = [];
-  }
-} catch {
-  history = [];
-}
+// When placements are complete, isInPlacements becomes false
+let isInPlacements = true;
+
+// Number of placement games required before rank is determined
+const placementsCount = 10;
 
 // Rank thresholds (eight tiers). Adjust these values to control how much XP is
 // required for each tier. Tiers must be sorted by increasing `min` value.
@@ -121,6 +133,212 @@ const B_VALUE = 0.25;
 // Pagination settings for analytics. Show a limited number of rows at once.
 const historyPageSize = 5;
 let historyPageIndex = 0;
+
+// The ID of the current user in Supabase Auth (null if not logged in or using local mode)
+let currentUserId = null;
+
+// ------------------------------------------------------------
+// Supabase helper functions (optional)
+// ------------------------------------------------------------
+// These helper functions wrap common operations against your Supabase
+// backend. They are asynchronous and return promises. When
+// `useSupabase` is false, they either resolve immediately or fall
+// back to local behavior. If you configure your Supabase URL and anon
+// key above, these functions will be used automatically when
+// registering users, logging in, saving profiles and history, and
+// fetching friend data. If you wish to fully migrate to Supabase,
+// replace the localStorage code in the existing functions with
+// equivalent calls to these helpers.
+
+// Fetch the current session user from Supabase Auth. Returns the
+// session user (containing id and email) or null if not logged in.
+async function getSupabaseUser() {
+  if (!useSupabase) return null;
+  const { data } = await supabase.auth.getUser();
+  return data?.user || null;
+}
+
+// Sign up a new user with username and password. On success,
+// inserts a row in the `profiles` table with initial values.
+async function supabaseSignUp(username, password) {
+  if (!useSupabase) throw new Error('Supabase is not configured');
+  // Use email as username if desired; here we store username in metadata
+  const { data, error } = await supabase.auth.signUp({
+    email: `${username}@example.com`,
+    password,
+    options: {
+      data: { username }
+    }
+  });
+  if (error) throw error;
+  const user = data?.user;
+  // Insert initial profile row
+  if (user) {
+    await supabase.from('profiles').insert({
+      id: user.id,
+      username,
+      total_xp: 0,
+      placements_played: 0,
+      placements_scores: [],
+      lp: 0,
+      rank_index: 0
+    });
+  }
+  return user;
+}
+
+// Sign in an existing user with username and password. The
+// corresponding email must be `${username}@example.com` or however
+// you chose to construct emails during sign up. Returns the session
+// user on success.
+async function supabaseSignIn(username, password) {
+  if (!useSupabase) throw new Error('Supabase is not configured');
+  const { data, error } = await supabase.auth.signInWithPassword({
+    email: `${username}@example.com`,
+    password
+  });
+  if (error) throw error;
+  return data?.user || null;
+}
+
+// Fetch a user's profile from the `profiles` table. Accepts either
+// their username or their auth user id. Returns an object with
+// profile fields or null if not found.
+async function fetchUserProfile(identifier) {
+  if (!useSupabase) return null;
+  let query;
+  if (typeof identifier === 'string' && identifier.includes('-')) {
+    query = supabase.from('profiles').select('*').eq('id', identifier);
+  } else {
+    query = supabase.from('profiles').select('*').eq('username', identifier);
+  }
+  const { data, error } = await query.single();
+  if (error) return null;
+  return data;
+}
+
+// Update a user's profile in the `profiles` table. Accepts the auth
+// user id and a payload of fields to update.
+async function updateUserProfile(userId, payload) {
+  if (!useSupabase) return;
+  await supabase.from('profiles').update(payload).eq('id', userId);
+}
+
+// Fetch history entries for a user from the `history` table. Returns
+// an array of objects sorted descending by date. Each entry should
+// include date, day, start, end, hours, tasks, xp, time_per_task,
+// lp_change and lp_after.
+async function fetchUserHistory(userId) {
+  if (!useSupabase) return [];
+  const { data, error } = await supabase
+    .from('history')
+    .select('*')
+    .eq('user_id', userId)
+    .order('date', { ascending: false });
+  if (error) return [];
+  return data || [];
+}
+
+// Insert a new history record for the user. Accepts a payload with
+// the same fields used in the local history array and persists
+// additional LP fields. Expects the authenticated user to be set.
+async function insertHistoryRecord(userId, entry) {
+  if (!useSupabase) return;
+  await supabase.from('history').insert({
+    user_id: userId,
+    date: entry.date,
+    day: entry.day,
+    start: entry.start,
+    end: entry.end,
+    hours: entry.hours,
+    tasks: entry.tasks,
+    xp: entry.xp,
+    time_per_task: entry.timePerTask,
+    lp_change: entry.lpChange,
+    lp_after: entry.lpAfter
+  });
+}
+
+// Fetch friends for the current user. Returns an array of usernames.
+async function fetchFriends(userId) {
+  if (!useSupabase) return [];
+  const { data, error } = await supabase
+    .from('friends')
+    .select('friend_username')
+    .eq('user_id', userId);
+  if (error) return [];
+  return data.map((row) => row.friend_username);
+}
+
+// Add a friend relationship for the current user. Accepts the
+// current user's id and a friend's username. Assumes the friend
+// exists in the profiles table. Does not create reciprocal
+// relationship.
+async function addFriendRelationship(userId, friendUsername) {
+  if (!useSupabase) return;
+  await supabase.from('friends').insert({
+    user_id: userId,
+    friend_username: friendUsername
+  });
+}
+
+// Fetch today's leaderboard. Retrieves the most recent history
+// entry for the current user and each friend and returns an array
+// sorted descending by XP. When not using Supabase, this function
+// falls back to local history and friends data.
+async function fetchDailyLeaderboard() {
+  const leaderboard = [];
+  if (useSupabase) {
+    // Get authenticated user
+    const supaUser = await getSupabaseUser();
+    if (!supaUser) return leaderboard;
+    // Fetch user's own latest history
+    const userHistory = await fetchUserHistory(supaUser.id);
+    if (userHistory && userHistory.length > 0) {
+      leaderboard.push({
+        player: (await fetchUserProfile(supaUser.id)).username,
+        ...userHistory[0]
+      });
+    }
+    // Fetch friends list and their latest history
+    const friendUsernames = await fetchFriends(supaUser.id);
+    for (const uname of friendUsernames) {
+      const profile = await fetchUserProfile(uname);
+      if (!profile) continue;
+      const fHistory = await fetchUserHistory(profile.id);
+      if (fHistory && fHistory.length > 0) {
+        leaderboard.push({
+          player: uname,
+          ...fHistory[0]
+        });
+      }
+    }
+    // Sort by XP descending
+    leaderboard.sort((a, b) => (b.xp || 0) - (a.xp || 0));
+    return leaderboard;
+  }
+  // Local fallback: gather last history entry of current user and friends
+  if (currentUserName) {
+    // Current user
+    if (history && history.length > 0) {
+      const latest = history[history.length - 1];
+      leaderboard.push({ player: currentUserName, ...latest });
+    }
+    // Each friend in local users
+    const currentUserObj = users[currentUserName];
+    if (currentUserObj && Array.isArray(currentUserObj.friends)) {
+      currentUserObj.friends.forEach((fname) => {
+        const fUser = users[fname];
+        if (fUser && Array.isArray(fUser.history) && fUser.history.length > 0) {
+          const fLatest = fUser.history[fUser.history.length - 1];
+          leaderboard.push({ player: fname, ...fLatest });
+        }
+      });
+    }
+    leaderboard.sort((a, b) => (b.xp || 0) - (a.xp || 0));
+  }
+  return leaderboard;
+}
 
 // Populate rank and hour tables on DOM load
 function populateTables() {
@@ -198,6 +416,327 @@ function highlightRank() {
       tr.classList.remove('active-rank');
     }
   });
+}
+
+// ------------------------------------------------------------
+// Multi‑user management functions
+// ------------------------------------------------------------
+
+// Load users from localStorage into the global users object
+function loadUsers() {
+  // When using Supabase, do not load anything from localStorage.
+  if (useSupabase) {
+    users = {};
+    return;
+  }
+  try {
+    const stored = localStorage.getItem('rankedUsers');
+    if (stored) {
+      const parsed = JSON.parse(stored);
+      if (parsed && typeof parsed === 'object') {
+        users = parsed;
+      }
+    }
+  } catch {
+    users = {};
+  }
+}
+
+// Persist all users and current user state to localStorage
+function saveUsers() {
+  // Persist user data either to Supabase or localStorage. When
+  // `useSupabase` is true, we update the current user's profile in
+  // the `profiles` table. Otherwise we fall back to storing the
+  // `users` map in localStorage.
+  if (useSupabase) {
+    if (currentUserId) {
+      const payload = {
+        total_xp: totalXp,
+        placements_played: placementsPlayed,
+        placements_scores: placementsScores,
+        lp: lp,
+        rank_index: rankIndex
+      };
+      updateUserProfile(currentUserId, payload).catch(() => {
+        /* ignore errors during background update */
+      });
+    }
+    return;
+  }
+  // Local storage fallback
+  if (currentUserName) {
+    if (!users[currentUserName]) {
+      users[currentUserName] = {};
+    }
+    const u = users[currentUserName];
+    u.totalXp = totalXp;
+    u.placementsPlayed = placementsPlayed;
+    u.placementsScores = placementsScores;
+    u.lp = lp;
+    u.rankIndex = rankIndex;
+    u.history = history;
+    if (!u.friends) u.friends = [];
+    if (!u.password) u.password = '';
+  }
+  localStorage.setItem('rankedUsers', JSON.stringify(users));
+  if (currentUserName) {
+    localStorage.setItem('currentUserName', currentUserName);
+  } else {
+    localStorage.removeItem('currentUserName');
+  }
+}
+
+// Show login form and hide the app
+function showLogin() {
+  const loginContainer = $('loginContainer');
+  const appContainer = $('appContainer');
+  const signOutBtn = $('signOutBtn');
+  if (loginContainer) loginContainer.style.display = 'block';
+  if (appContainer) appContainer.style.display = 'none';
+  if (signOutBtn) signOutBtn.style.display = 'none';
+}
+
+// Show the app interface and hide login form
+function showApp() {
+  const loginContainer = $('loginContainer');
+  const appContainer = $('appContainer');
+  const signOutBtn = $('signOutBtn');
+  if (loginContainer) loginContainer.style.display = 'none';
+  if (appContainer) appContainer.style.display = 'block';
+  if (signOutBtn) signOutBtn.style.display = 'inline-block';
+  // Show friend section if user has any friends (always visible after login)
+  const friendSection = $('friendSection');
+  if (friendSection) friendSection.style.display = 'block';
+}
+
+// Initialize global state from the logged in user's data
+function loadUserState(username) {
+  const user = users[username];
+  // Initialize user fields if they don't exist
+  if (!user) return;
+  currentUserName = username;
+  // Assign global variables
+  totalXp = user.totalXp || 0;
+  placementsPlayed = user.placementsPlayed || 0;
+  placementsScores = Array.isArray(user.placementsScores) ? user.placementsScores : [];
+  lp = user.lp || 0;
+  rankIndex = user.rankIndex || 0;
+  history = Array.isArray(user.history) ? user.history : [];
+  tasks = [];
+  startedAt = null;
+  pausedDuration = 0;
+  isPaused = false;
+  pauseStartedAt = null;
+  dailyXp = 0;
+  // Determine placements state
+  isInPlacements = placementsPlayed < placementsCount;
+  // Set isPaused and timer as not running
+  if (timerInterval) clearInterval(timerInterval);
+  timerInterval = null;
+  // Update UI to reflect loaded state
+  $('timerDisplay').textContent = 'Not started';
+  renderTasks();
+  updateTotals();
+  updateAnalytics();
+  renderFriends();
+  // Update leaderboard for the new user
+  updateLeaderboard();
+  // Clear any previous completion message
+  $('dailyXp').textContent = '0';
+}
+
+// Register a new user and log them in. Returns true on success.
+function registerUser(username, password) {
+  // Trim whitespace and ensure non-empty username
+  const name = username.trim();
+  if (!name) return false;
+  if (users[name]) {
+    return false; // user already exists
+  }
+  // Create a new user object with default fields
+  users[name] = {
+    password: password || '',
+    totalXp: 0,
+    placementsPlayed: 0,
+    placementsScores: [],
+    lp: 0,
+    rankIndex: 0,
+    history: [],
+    friends: []
+  };
+  saveUsers();
+  loadUserState(name);
+  return true;
+}
+
+// Log in an existing user. Returns true on success.
+function loginUser(username, password) {
+  const name = username.trim();
+  if (!name) return false;
+  const user = users[name];
+  if (!user) return false;
+  // If a password is stored, verify it
+  if (user.password && user.password !== password) {
+    return false;
+  }
+  loadUserState(name);
+  saveUsers();
+  return true;
+}
+
+// Log out the current user and reset state
+function logoutUser() {
+  // Persist current user state
+  saveUsers();
+  // Reset global state
+  currentUserName = null;
+  tasks = [];
+  startedAt = null;
+  if (timerInterval) clearInterval(timerInterval);
+  timerInterval = null;
+  pausedDuration = 0;
+  isPaused = false;
+  pauseStartedAt = null;
+  dailyXp = 0;
+  totalXp = 0;
+  placementsPlayed = 0;
+  placementsScores = [];
+  lp = 0;
+  rankIndex = 0;
+  history = [];
+  isInPlacements = true;
+  $('timerDisplay').textContent = 'Not started';
+  renderTasks();
+  updateTotals();
+  updateAnalytics();
+  // Hide leaderboard on logout
+  const leaderboardSection = $('leaderboard');
+  if (leaderboardSection) leaderboardSection.style.display = 'none';
+  // Hide app and show login
+  showLogin();
+}
+
+// Render the current user's friend list and their stats
+function renderFriends() {
+  const tableBody = document.querySelector('#friendTable tbody');
+  if (!tableBody) return;
+  tableBody.innerHTML = '';
+  if (!currentUserName) return;
+  // When using Supabase, fetch the latest friend data from the backend
+  if (useSupabase && currentUserId) {
+    (async () => {
+      const friendNames = await fetchFriends(currentUserId);
+      if (!friendNames || friendNames.length === 0) return;
+      users[currentUserName] = users[currentUserName] || {};
+      users[currentUserName].friends = friendNames;
+      for (const fname of friendNames) {
+        const profile = await fetchUserProfile(fname);
+        if (!profile) continue;
+        const tr = document.createElement('tr');
+        const tdName = document.createElement('td');
+        tdName.textContent = fname;
+        const tdRank = document.createElement('td');
+        const tdXp = document.createElement('td');
+        // Determine rank from rank_index or total_xp
+        let rankName = '';
+        if (typeof profile.rank_index === 'number' && ranks[profile.rank_index]) {
+          rankName = ranks[profile.rank_index].name;
+        } else {
+          rankName = getRank(profile.total_xp || 0);
+        }
+        tdRank.textContent = rankName;
+        tdXp.textContent = profile.total_xp || 0;
+        tr.appendChild(tdName);
+        tr.appendChild(tdRank);
+        tr.appendChild(tdXp);
+        tableBody.appendChild(tr);
+      }
+    })();
+    return;
+  }
+  // Local fallback
+  const u = users[currentUserName];
+  if (!u || !Array.isArray(u.friends)) return;
+  u.friends.forEach((fname) => {
+    const friend = users[fname];
+    if (!friend) return;
+    const tr = document.createElement('tr');
+    const tdName = document.createElement('td');
+    tdName.textContent = fname;
+    const tdRank = document.createElement('td');
+    let fRankName = '';
+    if (typeof friend.rankIndex === 'number' && ranks[friend.rankIndex]) {
+      fRankName = ranks[friend.rankIndex].name;
+    } else {
+      fRankName = getRank(friend.totalXp || 0);
+    }
+    tdRank.textContent = fRankName;
+    const tdXp = document.createElement('td');
+    tdXp.textContent = friend.totalXp || 0;
+    tr.appendChild(tdName);
+    tr.appendChild(tdRank);
+    tr.appendChild(tdXp);
+    tableBody.appendChild(tr);
+  });
+}
+
+// Add a friend to the current user's friend list
+function addFriend() {
+  if (!currentUserName) return;
+  const input = $('friendInput');
+  if (!input) return;
+  const friendName = input.value.trim();
+  if (!friendName) return;
+  if (friendName === currentUserName) {
+    alert('You cannot add yourself as a friend.');
+    return;
+  }
+  // When using Supabase, verify friend exists in profiles table and
+  // insert a row into the friends table. Otherwise, use local users
+  // storage.
+  if (useSupabase) {
+    (async () => {
+      try {
+        // Check if friend profile exists
+        const profile = await fetchUserProfile(friendName);
+        if (!profile) {
+          alert('User not found.');
+          return;
+        }
+        // Add friend relationship in Supabase
+        await addFriendRelationship(currentUserId, friendName);
+        // Update local cache of friends for current session
+        if (!users[currentUserName]) users[currentUserName] = {};
+        if (!Array.isArray(users[currentUserName].friends)) users[currentUserName].friends = [];
+        users[currentUserName].friends.push(friendName);
+        input.value = '';
+        renderFriends();
+        alert(`${friendName} added to your friends list.`);
+        updateLeaderboard();
+      } catch (err) {
+        alert('Could not add friend.');
+      }
+    })();
+    return;
+  }
+  // Local fallback
+  if (!users[friendName]) {
+    alert('User not found.');
+    return;
+  }
+  const u = users[currentUserName];
+  if (!u.friends) u.friends = [];
+  if (u.friends.includes(friendName)) {
+    alert('Friend already added.');
+    input.value = '';
+    return;
+  }
+  u.friends.push(friendName);
+  input.value = '';
+  renderFriends();
+  saveUsers();
+  alert(`${friendName} added to your friends list.`);
+  updateLeaderboard();
 }
 
 // Update total XP and rank display
@@ -282,17 +821,10 @@ function resetProgress() {
   isInPlacements = true;
   lp = 0;
   rankIndex = 0;
-  // Persist resets to localStorage
-  localStorage.setItem('totalXp', totalXp);
-  localStorage.setItem('placementsPlayed', placementsPlayed);
-  localStorage.setItem('placementsScores', JSON.stringify(placementsScores));
-  localStorage.setItem('lp', lp);
-  localStorage.setItem('rankIndex', rankIndex);
   $('timerDisplay').textContent = 'Not started';
   updateTotals();
   // Clear analytics history
   history = [];
-  localStorage.removeItem('rankedHistory');
   // Reset pagination index
   historyPageIndex = 0;
   updateAnalytics();
@@ -308,6 +840,22 @@ function resetProgress() {
     pauseBtn.disabled = true;
     pauseBtn.textContent = 'Pause';
   }
+  // Persist reset to user profile
+  // When using Supabase, update the profile and remove history
+  if (useSupabase && currentUserId) {
+    // Remove all history rows for this user
+    supabase.from('history').delete().eq('user_id', currentUserId).catch(() => {});
+    // Update profile fields
+    const payload = {
+      total_xp: 0,
+      placements_played: 0,
+      placements_scores: [],
+      lp: 0,
+      rank_index: 0
+    };
+    updateUserProfile(currentUserId, payload).catch(() => {});
+  }
+  saveUsers();
 }
 
 // Render the tasks list to the DOM
@@ -500,9 +1048,6 @@ function stopDay() {
   if (isInPlacements) {
     placementsScores.push(dailyXp);
     placementsPlayed++;
-    // Persist placements state
-    localStorage.setItem('placementsScores', JSON.stringify(placementsScores));
-    localStorage.setItem('placementsPlayed', placementsPlayed);
     if (placementsPlayed >= placementsCount) {
       // Compute average XP across placements
       const sum = placementsScores.reduce((acc, val) => acc + val, 0);
@@ -510,16 +1055,12 @@ function stopDay() {
       rankIndex = getStartingRankIndex(avg);
       lp = 0;
       isInPlacements = false;
-      // Persist rank and LP
-      localStorage.setItem('rankIndex', rankIndex);
-      localStorage.setItem('lp', lp);
       alert(`Placements complete! Your starting rank is ${ranks[rankIndex].name}.`);
     } else {
       alert(`Placement match recorded. ${placementsPlayed} / ${placementsCount} completed.`);
     }
     // Accumulate total XP for analytics
     totalXp += dailyXp;
-    localStorage.setItem('totalXp', totalXp);
     updateTotals();
   } else {
     // After placements, determine LP gain or loss
@@ -550,12 +1091,8 @@ function stopDay() {
         lp = 0;
       }
     }
-    // Persist LP and rank
-    localStorage.setItem('lp', lp);
-    localStorage.setItem('rankIndex', rankIndex);
     // Accumulate total XP for analytics (still tracked for curiosity)
     totalXp += dailyXp;
-    localStorage.setItem('totalXp', totalXp);
     // Inform user of result
     const changeText = lpChange > 0 ? `gained ${lpChange} LP` : `lost ${Math.abs(lpChange)} LP`;
     let message = `Match complete: you ${changeText}.`;
@@ -595,9 +1132,26 @@ function stopDay() {
     historyEntry.lpAfter = null;
   }
   history.push(historyEntry);
-  // Save analytics history to localStorage
-  localStorage.setItem('rankedHistory', JSON.stringify(history));
+  // Persist user data and history. If Supabase is enabled, insert
+  // the history record and update the profile; otherwise update
+  // localStorage. We deliberately call insertHistoryRecord here to
+  // ensure the new entry is saved before reloading the leaderboard.
+  if (useSupabase && currentUserId) {
+    insertHistoryRecord(currentUserId, historyEntry).catch(() => {});
+    // Update profile asynchronously
+    const payload = {
+      total_xp: totalXp,
+      placements_played: placementsPlayed,
+      placements_scores: placementsScores,
+      lp: lp,
+      rank_index: rankIndex
+    };
+    updateUserProfile(currentUserId, payload).catch(() => {});
+  }
+  // Persist local fallback
+  saveUsers();
   updateAnalytics();
+  updateLeaderboard();
   // Reset state for next day
   startedAt = null;
   tasks = [];
@@ -702,6 +1256,72 @@ function exportCsv() {
   URL.revokeObjectURL(url);
 }
 
+// ------------------------------------------------------------
+// Leaderboard rendering
+// ------------------------------------------------------------
+// Fetch and display the daily leaderboard. This function retrieves the
+// most recent history entry for the current user and their friends,
+// sorts them by XP descending and populates the leaderboard table. It
+// is asynchronous because it may query Supabase. If no data is
+// available (e.g., no days completed yet), the leaderboard section is
+// hidden.
+async function updateLeaderboard() {
+  const leaderboardSection = $('leaderboard');
+  const tableBody = document.querySelector('#leaderboardTable tbody');
+  if (!leaderboardSection || !tableBody) return;
+  // Fetch leaderboard data
+  const rows = await fetchDailyLeaderboard();
+  // Clear existing rows
+  tableBody.innerHTML = '';
+  if (!rows || rows.length === 0) {
+    leaderboardSection.style.display = 'none';
+    return;
+  }
+  // Show section
+  leaderboardSection.style.display = 'block';
+  // Populate table
+  rows.forEach((entry) => {
+    const tr = document.createElement('tr');
+    // Player name
+    const tdPlayer = document.createElement('td');
+    tdPlayer.textContent = entry.player;
+    // Date
+    const tdDate = document.createElement('td');
+    tdDate.textContent = entry.date;
+    // Day
+    const tdDay = document.createElement('td');
+    tdDay.textContent = entry.day || '';
+    // Start
+    const tdStart = document.createElement('td');
+    tdStart.textContent = entry.start || '';
+    // End
+    const tdEnd = document.createElement('td');
+    tdEnd.textContent = entry.end || '';
+    // Hours
+    const tdHours = document.createElement('td');
+    tdHours.textContent = entry.hours != null ? entry.hours.toString() : '';
+    // Tasks
+    const tdTasks = document.createElement('td');
+    tdTasks.textContent = entry.tasks != null ? entry.tasks.toString() : '';
+    // XP
+    const tdXp = document.createElement('td');
+    tdXp.textContent = entry.xp != null ? entry.xp.toString() : '';
+    // Time per task
+    const tdTPT = document.createElement('td');
+    tdTPT.textContent = entry.timePerTask != null ? entry.timePerTask.toString() : '';
+    tr.appendChild(tdPlayer);
+    tr.appendChild(tdDate);
+    tr.appendChild(tdDay);
+    tr.appendChild(tdStart);
+    tr.appendChild(tdEnd);
+    tr.appendChild(tdHours);
+    tr.appendChild(tdTasks);
+    tr.appendChild(tdXp);
+    tr.appendChild(tdTPT);
+    tableBody.appendChild(tr);
+  });
+}
+
 // Update analytics table and summary statistics
 function updateAnalytics() {
   const tableBody = document.querySelector('#historyTable tbody');
@@ -778,11 +1398,31 @@ function updateAnalytics() {
   if (nextBtn) {
     nextBtn.disabled = historyPageIndex <= 0;
   }
+
+  // After updating analytics, update the leaderboard asynchronously
+  // to reflect any new entries. We do not await this call here as it
+  // would block rendering; the leaderboard will update when data is
+  // fetched.
+  updateLeaderboard();
 }
 
 // Bind event listeners once the DOM has loaded
 window.addEventListener('DOMContentLoaded', () => {
+  // Load users from localStorage
+  loadUsers();
+  // Attempt to auto‑login the last user
+  const savedName = localStorage.getItem('currentUserName');
+  if (savedName && users[savedName]) {
+    loadUserState(savedName);
+    showApp();
+  } else {
+    showLogin();
+  }
+  // Update UI tables
+  populateTables();
   updateTotals();
+  updateAnalytics();
+  // Task controls
   $('addTaskBtn').addEventListener('click', addTask);
   // Allow pressing Enter in the task input to add a new task
   const taskInputEl = $('taskInput');
@@ -801,14 +1441,161 @@ window.addEventListener('DOMContentLoaded', () => {
     pauseBtnEl.addEventListener('click', togglePause);
   }
   $('resetBtn').addEventListener('click', resetProgress);
-  populateTables();
-  updateAnalytics();
-
-  // Bind pagination controls
+  // Pagination and export controls
   const prevBtn = $('prevHistoryPage');
   const nextBtn = $('nextHistoryPage');
   const exportBtn = $('exportCsvBtn');
   if (prevBtn) prevBtn.addEventListener('click', () => changeHistoryPage(1));
   if (nextBtn) nextBtn.addEventListener('click', () => changeHistoryPage(-1));
   if (exportBtn) exportBtn.addEventListener('click', exportCsv);
+  // Login/register controls
+  const loginBtn = $('loginBtn');
+  const registerBtn = $('registerBtn');
+  const signOutBtn = $('signOutBtn');
+  const addFriendBtn = $('addFriendBtn');
+  if (loginBtn) {
+    loginBtn.addEventListener('click', async () => {
+      const username = $('usernameInput').value;
+      const password = $('passwordInput').value;
+      const errorEl = $('loginError');
+      if (!username) return;
+      if (useSupabase) {
+        try {
+          // Attempt to sign in via Supabase
+          const user = await supabaseSignIn(username, password);
+          if (!user) {
+            throw new Error('Invalid credentials');
+          }
+          // Fetch profile and history
+          const profile = await fetchUserProfile(user.id);
+          // Map supabase data to local state variables
+          if (profile) {
+            currentUserName = profile.username;
+            currentUserId = user.id;
+            totalXp = profile.total_xp || 0;
+            placementsPlayed = profile.placements_played || 0;
+            placementsScores = profile.placements_scores || [];
+            lp = profile.lp || 0;
+            rankIndex = profile.rank_index || 0;
+            isInPlacements = placementsPlayed < placementsCount;
+          }
+          // Load history from Supabase
+          history = await fetchUserHistory(user.id) || [];
+          tasks = [];
+          startedAt = null;
+          pausedDuration = 0;
+          isPaused = false;
+          pauseStartedAt = null;
+          dailyXp = 0;
+          // Fetch friend list
+          const friendUsernames = await fetchFriends(user.id);
+          if (!users[currentUserName]) users[currentUserName] = {};
+          users[currentUserName].friends = friendUsernames;
+          // Display the app
+          $('usernameInput').value = '';
+          $('passwordInput').value = '';
+          if (errorEl) errorEl.style.display = 'none';
+          showApp();
+          updateTotals();
+          updateAnalytics();
+          renderFriends();
+        } catch (err) {
+          if (errorEl) {
+            errorEl.textContent = 'Invalid username or password.';
+            errorEl.style.display = 'block';
+          }
+        }
+      } else {
+        const success = loginUser(username, password);
+        if (success) {
+          $('usernameInput').value = '';
+          $('passwordInput').value = '';
+          if (errorEl) errorEl.style.display = 'none';
+          showApp();
+          updateTotals();
+          updateAnalytics();
+          renderFriends();
+        } else {
+          if (errorEl) {
+            errorEl.textContent = 'Invalid username or password.';
+            errorEl.style.display = 'block';
+          }
+        }
+      }
+    });
+  }
+  if (registerBtn) {
+    registerBtn.addEventListener('click', async () => {
+      const username = $('usernameInput').value;
+      const password = $('passwordInput').value;
+      const errorEl = $('loginError');
+      if (!username) return;
+      if (useSupabase) {
+        try {
+          // Attempt to sign up via Supabase
+          const user = await supabaseSignUp(username, password);
+          if (!user) {
+            throw new Error('Registration failed');
+          }
+          // Immediately sign in the user (Supabase returns session on sign up)
+          currentUserName = username;
+          currentUserId = user.id;
+          totalXp = 0;
+          placementsPlayed = 0;
+          placementsScores = [];
+          lp = 0;
+          rankIndex = 0;
+          isInPlacements = true;
+          history = [];
+          tasks = [];
+          startedAt = null;
+          pausedDuration = 0;
+          isPaused = false;
+          pauseStartedAt = null;
+          dailyXp = 0;
+          // Initialize empty friend list in local cache
+          users[currentUserName] = { friends: [] };
+          // Clear fields and update UI
+          $('usernameInput').value = '';
+          $('passwordInput').value = '';
+          if (errorEl) errorEl.style.display = 'none';
+          alert('Account created! You are now logged in.');
+          showApp();
+          updateTotals();
+          updateAnalytics();
+          renderFriends();
+        } catch (err) {
+          if (errorEl) {
+            errorEl.textContent = 'Registration failed: username may already be taken.';
+            errorEl.style.display = 'block';
+          }
+        }
+      } else {
+        const success = registerUser(username, password);
+        if (success) {
+          $('usernameInput').value = '';
+          $('passwordInput').value = '';
+          if (errorEl) errorEl.style.display = 'none';
+          alert('Account created! You are now logged in.');
+          showApp();
+          updateTotals();
+          updateAnalytics();
+          renderFriends();
+        } else {
+          if (errorEl) {
+            errorEl.textContent = 'Username already exists or invalid.';
+            errorEl.style.display = 'block';
+          }
+        }
+      }
+    });
+  }
+  if (signOutBtn) {
+    signOutBtn.addEventListener('click', () => {
+      logoutUser();
+    });
+  }
+  if (addFriendBtn) {
+    addFriendBtn.addEventListener('click', addFriend);
+  }
 });
