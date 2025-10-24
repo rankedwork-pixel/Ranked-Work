@@ -376,6 +376,13 @@
     </div>
   </div>
   <!-- Load the application logic from an external file to avoid inline script restrictions -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script>
+    window.sb = supabase.createClient(
+      'https://ktijxkeylmllpijrzkyd.supabase.co',
+      'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imt0aWp4a2V5bG1sbHBpanJ6a3lkIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjEyNTUwOTEsImV4cCI6MjA3NjgzMTA5MX0.z3cHnnlgwa1BUpOsiA36F3EvTpLkK8WHkOKRB9CiLXA'
+    );
+  </script>
   <script src="main.js"></script>
 </body>
 </html>
