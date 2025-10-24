@@ -1,65 +1,41 @@
-// Ranked Work application logic (8‑Tier Edition)
-// This script implements a simple productivity tracker. It stores a list of tasks,
-// tracks elapsed time for the day's work, awards XP based on how fast you finish,
-// and assigns a rank based on cumulative XP. All persistent data (total XP) is
-// stored in localStorage.
+// Ranked Work application logic (multi‑user edition)
+// This script implements a productivity tracker with ranked progression, placement
+// matches, LP system and analytics. It has been extended to support multiple
+// user profiles with login and registration, basic password storage, and a
+// lightweight friends system. User data is persisted in localStorage.
 
 // Helper for selecting elements by id
 const $ = (id) => document.getElementById(id);
 
-// Application state
+// ------------------------------------------------------------
+// Global state
+// ------------------------------------------------------------
+// A map of all users keyed by username. Each user object stores
+// persistent fields: password, totalXp, placementsPlayed, placementsScores,
+// lp, rankIndex, history (array), and friends (array of usernames).
+let users = {};
+// The name of the currently logged‑in user (null if no user logged in)
+let currentUserName = null;
+// Application state for the current session. These variables mirror fields
+// stored for each user and are loaded when a user logs in.
 let tasks = [];
 let startedAt = null;
 let timerInterval = null;
 let pausedDuration = 0;
-// Track pause state and the timestamp when pausing started. When isPaused is true,
-// the timer is not advancing and the pause duration will be subtracted from total time.
 let isPaused = false;
 let pauseStartedAt = null;
-// XP awarded for the current day. In the new system this is used to assess
-// performance but does not directly contribute to rank placement after the
-// initial placement phase.
 let dailyXp = 0;
-
-// Placement and LP (League Points) state. We adopt a system similar to
-// competitive games: users play a fixed number of placement games to
-// determine their starting rank, after which daily performance grants or
-// deducts LP. When LP reaches 100 you rank up; below 0 you rank down.
-const placementsCount = 10;
-let placementsPlayed = parseInt(localStorage.getItem('placementsPlayed')) || 0;
+let totalXp = 0;
+let placementsPlayed = 0;
 let placementsScores = [];
-try {
-  const ps = localStorage.getItem('placementsScores');
-  if (ps) {
-    placementsScores = JSON.parse(ps);
-    if (!Array.isArray(placementsScores)) placementsScores = [];
-  }
-} catch {
-  placementsScores = [];
-}
-// LP value ranges from 0–99. Promotions occur when lp >= 100; demotions
-// occur when lp < 0. We persist lp and current rank index in localStorage.
-let lp = parseInt(localStorage.getItem('lp')) || 0;
-let rankIndex = parseInt(localStorage.getItem('rankIndex')) || 0;
-// Determine if we are still in placements. Once placementsPlayed >=
-// placementsCount, isInPlacements becomes false.
-let isInPlacements = placementsPlayed < placementsCount;
-// We continue to track total XP for analytics, although it no longer
-// determines the rank. Default to 0 if not present.
-let totalXp = parseInt(localStorage.getItem('totalXp')) || 0;
-
-// Load analytics history from localStorage. Each entry stores
-// { date: string (ISO), hours: number, tasks: number, xp: number }
+let lp = 0;
+let rankIndex = 0;
 let history = [];
-try {
-  const stored = localStorage.getItem('rankedHistory');
-  if (stored) {
-    history = JSON.parse(stored);
-    if (!Array.isArray(history)) history = [];
-  }
-} catch {
-  history = [];
-}
+// When placements are complete, isInPlacements becomes false
+let isInPlacements = true;
+
+// Number of placement games required before rank is determined
+const placementsCount = 10;
 
 // Rank thresholds (eight tiers). Adjust these values to control how much XP is
 // required for each tier. Tiers must be sorted by increasing `min` value.
@@ -200,6 +176,238 @@ function highlightRank() {
   });
 }
 
+// ------------------------------------------------------------
+// Multi‑user management functions
+// ------------------------------------------------------------
+
+// Load users from localStorage into the global users object
+function loadUsers() {
+  try {
+    const stored = localStorage.getItem('rankedUsers');
+    if (stored) {
+      const parsed = JSON.parse(stored);
+      if (parsed && typeof parsed === 'object') {
+        users = parsed;
+      }
+    }
+  } catch {
+    users = {};
+  }
+}
+
+// Persist all users and current user state to localStorage
+function saveUsers() {
+  if (currentUserName) {
+    // Update the current user's record with the latest state
+    if (!users[currentUserName]) {
+      users[currentUserName] = {};
+    }
+    const u = users[currentUserName];
+    u.totalXp = totalXp;
+    u.placementsPlayed = placementsPlayed;
+    u.placementsScores = placementsScores;
+    u.lp = lp;
+    u.rankIndex = rankIndex;
+    u.history = history;
+    // ensure friends and password are retained
+    if (!u.friends) u.friends = [];
+    if (!u.password) u.password = '';
+  }
+  localStorage.setItem('rankedUsers', JSON.stringify(users));
+  if (currentUserName) {
+    localStorage.setItem('currentUserName', currentUserName);
+  } else {
+    localStorage.removeItem('currentUserName');
+  }
+}
+
+// Show login form and hide the app
+function showLogin() {
+  const loginContainer = $('loginContainer');
+  const appContainer = $('appContainer');
+  const signOutBtn = $('signOutBtn');
+  if (loginContainer) loginContainer.style.display = 'block';
+  if (appContainer) appContainer.style.display = 'none';
+  if (signOutBtn) signOutBtn.style.display = 'none';
+}
+
+// Show the app interface and hide login form
+function showApp() {
+  const loginContainer = $('loginContainer');
+  const appContainer = $('appContainer');
+  const signOutBtn = $('signOutBtn');
+  if (loginContainer) loginContainer.style.display = 'none';
+  if (appContainer) appContainer.style.display = 'block';
+  if (signOutBtn) signOutBtn.style.display = 'inline-block';
+  // Show friend section if user has any friends (always visible after login)
+  const friendSection = $('friendSection');
+  if (friendSection) friendSection.style.display = 'block';
+}
+
+// Initialize global state from the logged in user's data
+function loadUserState(username) {
+  const user = users[username];
+  // Initialize user fields if they don't exist
+  if (!user) return;
+  currentUserName = username;
+  // Assign global variables
+  totalXp = user.totalXp || 0;
+  placementsPlayed = user.placementsPlayed || 0;
+  placementsScores = Array.isArray(user.placementsScores) ? user.placementsScores : [];
+  lp = user.lp || 0;
+  rankIndex = user.rankIndex || 0;
+  history = Array.isArray(user.history) ? user.history : [];
+  tasks = [];
+  startedAt = null;
+  pausedDuration = 0;
+  isPaused = false;
+  pauseStartedAt = null;
+  dailyXp = 0;
+  // Determine placements state
+  isInPlacements = placementsPlayed < placementsCount;
+  // Set isPaused and timer as not running
+  if (timerInterval) clearInterval(timerInterval);
+  timerInterval = null;
+  // Update UI to reflect loaded state
+  $('timerDisplay').textContent = 'Not started';
+  renderTasks();
+  updateTotals();
+  updateAnalytics();
+  renderFriends();
+  // Clear any previous completion message
+  $('dailyXp').textContent = '0';
+}
+
+// Register a new user and log them in. Returns true on success.
+function registerUser(username, password) {
+  // Trim whitespace and ensure non-empty username
+  const name = username.trim();
+  if (!name) return false;
+  if (users[name]) {
+    return false; // user already exists
+  }
+  // Create a new user object with default fields
+  users[name] = {
+    password: password || '',
+    totalXp: 0,
+    placementsPlayed: 0,
+    placementsScores: [],
+    lp: 0,
+    rankIndex: 0,
+    history: [],
+    friends: []
+  };
+  saveUsers();
+  loadUserState(name);
+  return true;
+}
+
+// Log in an existing user. Returns true on success.
+function loginUser(username, password) {
+  const name = username.trim();
+  if (!name) return false;
+  const user = users[name];
+  if (!user) return false;
+  // If a password is stored, verify it
+  if (user.password && user.password !== password) {
+    return false;
+  }
+  loadUserState(name);
+  saveUsers();
+  return true;
+}
+
+// Log out the current user and reset state
+function logoutUser() {
+  // Persist current user state
+  saveUsers();
+  // Reset global state
+  currentUserName = null;
+  tasks = [];
+  startedAt = null;
+  if (timerInterval) clearInterval(timerInterval);
+  timerInterval = null;
+  pausedDuration = 0;
+  isPaused = false;
+  pauseStartedAt = null;
+  dailyXp = 0;
+  totalXp = 0;
+  placementsPlayed = 0;
+  placementsScores = [];
+  lp = 0;
+  rankIndex = 0;
+  history = [];
+  isInPlacements = true;
+  $('timerDisplay').textContent = 'Not started';
+  renderTasks();
+  updateTotals();
+  updateAnalytics();
+  // Hide app and show login
+  showLogin();
+}
+
+// Render the current user's friend list and their stats
+function renderFriends() {
+  const tableBody = document.querySelector('#friendTable tbody');
+  if (!tableBody) return;
+  tableBody.innerHTML = '';
+  if (!currentUserName) return;
+  const u = users[currentUserName];
+  if (!u || !Array.isArray(u.friends)) return;
+  u.friends.forEach((fname) => {
+    const friend = users[fname];
+    if (!friend) return;
+    const tr = document.createElement('tr');
+    const tdName = document.createElement('td');
+    tdName.textContent = fname;
+    const tdRank = document.createElement('td');
+    // Determine friend rank from their rankIndex or totalXp
+    let fRankName = '';
+    if (typeof friend.rankIndex === 'number' && ranks[friend.rankIndex]) {
+      fRankName = ranks[friend.rankIndex].name;
+    } else {
+      // fallback: compute rank from totalXp using getRank
+      fRankName = getRank(friend.totalXp || 0);
+    }
+    tdRank.textContent = fRankName;
+    const tdXp = document.createElement('td');
+    tdXp.textContent = friend.totalXp || 0;
+    tr.appendChild(tdName);
+    tr.appendChild(tdRank);
+    tr.appendChild(tdXp);
+    tableBody.appendChild(tr);
+  });
+}
+
+// Add a friend to the current user's friend list
+function addFriend() {
+  if (!currentUserName) return;
+  const input = $('friendInput');
+  if (!input) return;
+  const friendName = input.value.trim();
+  if (!friendName) return;
+  if (friendName === currentUserName) {
+    alert('You cannot add yourself as a friend.');
+    return;
+  }
+  if (!users[friendName]) {
+    alert('User not found.');
+    return;
+  }
+  const u = users[currentUserName];
+  if (!u.friends) u.friends = [];
+  if (u.friends.includes(friendName)) {
+    alert('Friend already added.');
+    input.value = '';
+    return;
+  }
+  u.friends.push(friendName);
+  input.value = '';
+  renderFriends();
+  saveUsers();
+  alert(`${friendName} added to your friends list.`);
+}
+
 // Update total XP and rank display
 function updateTotals() {
   // Update total XP display even though XP no longer determines rank
@@ -282,17 +490,10 @@ function resetProgress() {
   isInPlacements = true;
   lp = 0;
   rankIndex = 0;
-  // Persist resets to localStorage
-  localStorage.setItem('totalXp', totalXp);
-  localStorage.setItem('placementsPlayed', placementsPlayed);
-  localStorage.setItem('placementsScores', JSON.stringify(placementsScores));
-  localStorage.setItem('lp', lp);
-  localStorage.setItem('rankIndex', rankIndex);
   $('timerDisplay').textContent = 'Not started';
   updateTotals();
   // Clear analytics history
   history = [];
-  localStorage.removeItem('rankedHistory');
   // Reset pagination index
   historyPageIndex = 0;
   updateAnalytics();
@@ -308,6 +509,8 @@ function resetProgress() {
     pauseBtn.disabled = true;
     pauseBtn.textContent = 'Pause';
   }
+  // Persist reset to user profile
+  saveUsers();
 }
 
 // Render the tasks list to the DOM
@@ -500,9 +703,6 @@ function stopDay() {
   if (isInPlacements) {
     placementsScores.push(dailyXp);
     placementsPlayed++;
-    // Persist placements state
-    localStorage.setItem('placementsScores', JSON.stringify(placementsScores));
-    localStorage.setItem('placementsPlayed', placementsPlayed);
     if (placementsPlayed >= placementsCount) {
       // Compute average XP across placements
       const sum = placementsScores.reduce((acc, val) => acc + val, 0);
@@ -510,16 +710,12 @@ function stopDay() {
       rankIndex = getStartingRankIndex(avg);
       lp = 0;
       isInPlacements = false;
-      // Persist rank and LP
-      localStorage.setItem('rankIndex', rankIndex);
-      localStorage.setItem('lp', lp);
       alert(`Placements complete! Your starting rank is ${ranks[rankIndex].name}.`);
     } else {
       alert(`Placement match recorded. ${placementsPlayed} / ${placementsCount} completed.`);
     }
     // Accumulate total XP for analytics
     totalXp += dailyXp;
-    localStorage.setItem('totalXp', totalXp);
     updateTotals();
   } else {
     // After placements, determine LP gain or loss
@@ -550,12 +746,8 @@ function stopDay() {
         lp = 0;
       }
     }
-    // Persist LP and rank
-    localStorage.setItem('lp', lp);
-    localStorage.setItem('rankIndex', rankIndex);
     // Accumulate total XP for analytics (still tracked for curiosity)
     totalXp += dailyXp;
-    localStorage.setItem('totalXp', totalXp);
     // Inform user of result
     const changeText = lpChange > 0 ? `gained ${lpChange} LP` : `lost ${Math.abs(lpChange)} LP`;
     let message = `Match complete: you ${changeText}.`;
@@ -595,8 +787,8 @@ function stopDay() {
     historyEntry.lpAfter = null;
   }
   history.push(historyEntry);
-  // Save analytics history to localStorage
-  localStorage.setItem('rankedHistory', JSON.stringify(history));
+  // Persist user data after updating history
+  saveUsers();
   updateAnalytics();
   // Reset state for next day
   startedAt = null;
@@ -782,7 +974,21 @@ function updateAnalytics() {
 
 // Bind event listeners once the DOM has loaded
 window.addEventListener('DOMContentLoaded', () => {
+  // Load users from localStorage
+  loadUsers();
+  // Attempt to auto‑login the last user
+  const savedName = localStorage.getItem('currentUserName');
+  if (savedName && users[savedName]) {
+    loadUserState(savedName);
+    showApp();
+  } else {
+    showLogin();
+  }
+  // Update UI tables
+  populateTables();
   updateTotals();
+  updateAnalytics();
+  // Task controls
   $('addTaskBtn').addEventListener('click', addTask);
   // Allow pressing Enter in the task input to add a new task
   const taskInputEl = $('taskInput');
@@ -801,14 +1007,71 @@ window.addEventListener('DOMContentLoaded', () => {
     pauseBtnEl.addEventListener('click', togglePause);
   }
   $('resetBtn').addEventListener('click', resetProgress);
-  populateTables();
-  updateAnalytics();
-
-  // Bind pagination controls
+  // Pagination and export controls
   const prevBtn = $('prevHistoryPage');
   const nextBtn = $('nextHistoryPage');
   const exportBtn = $('exportCsvBtn');
   if (prevBtn) prevBtn.addEventListener('click', () => changeHistoryPage(1));
   if (nextBtn) nextBtn.addEventListener('click', () => changeHistoryPage(-1));
   if (exportBtn) exportBtn.addEventListener('click', exportCsv);
+  // Login/register controls
+  const loginBtn = $('loginBtn');
+  const registerBtn = $('registerBtn');
+  const signOutBtn = $('signOutBtn');
+  const addFriendBtn = $('addFriendBtn');
+  if (loginBtn) {
+    loginBtn.addEventListener('click', () => {
+      const username = $('usernameInput').value;
+      const password = $('passwordInput').value;
+      const success = loginUser(username, password);
+      const errorEl = $('loginError');
+      if (success) {
+        // Clear fields
+        $('usernameInput').value = '';
+        $('passwordInput').value = '';
+        if (errorEl) errorEl.style.display = 'none';
+        showApp();
+        updateTotals();
+        updateAnalytics();
+        renderFriends();
+      } else {
+        if (errorEl) {
+          errorEl.textContent = 'Invalid username or password.';
+          errorEl.style.display = 'block';
+        }
+      }
+    });
+  }
+  if (registerBtn) {
+    registerBtn.addEventListener('click', () => {
+      const username = $('usernameInput').value;
+      const password = $('passwordInput').value;
+      const success = registerUser(username, password);
+      const errorEl = $('loginError');
+      if (success) {
+        // Clear fields
+        $('usernameInput').value = '';
+        $('passwordInput').value = '';
+        if (errorEl) errorEl.style.display = 'none';
+        alert('Account created! You are now logged in.');
+        showApp();
+        updateTotals();
+        updateAnalytics();
+        renderFriends();
+      } else {
+        if (errorEl) {
+          errorEl.textContent = 'Username already exists or invalid.';
+          errorEl.style.display = 'block';
+        }
+      }
+    });
+  }
+  if (signOutBtn) {
+    signOutBtn.addEventListener('click', () => {
+      logoutUser();
+    });
+  }
+  if (addFriendBtn) {
+    addFriendBtn.addEventListener('click', addFriend);
+  }
 });

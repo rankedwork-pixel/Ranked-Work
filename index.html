@@ -254,8 +254,23 @@
   <header>
     <h1>Ranked Work</h1>
     <p>Finish your tasks fast to level up!</p>
+    <!-- Sign out button appears only when logged in -->
+    <button id="signOutBtn" class="secondary" style="display:none; margin-top:0.5rem;">Sign Out</button>
   </header>
-  <div class="container">
+  <!-- Login and registration container -->
+  <div id="loginContainer" class="container" style="display:none; max-width: 360px;">
+    <h2 style="color:#d4af37; text-align:center;">Welcome</h2>
+    <div class="flex" style="margin-top:0.5rem; gap:0.5rem; flex-direction:column;">
+      <input type="text" id="usernameInput" class="task-input" placeholder="Username">
+      <input type="password" id="passwordInput" class="task-input" placeholder="Password">
+      <button id="loginBtn" class="primary">Log In</button>
+      <button id="registerBtn" class="secondary">Register</button>
+      <div id="loginError" style="color:#e88c8c; margin-top:0.5rem; display:none;">Invalid username or password.</div>
+    </div>
+  </div>
+  <!-- Main app container: hidden until user logs in -->
+  <div id="appContainer" class="container" style="display:none;">
+    <!-- Task input and list -->
     <div class="flex">
       <input type="text" id="taskInput" class="task-input" placeholder="Add a task...">
       <button id="addTaskBtn" class="primary">Add Task</button>
@@ -267,6 +282,7 @@
       <button id="stopBtn" class="secondary" disabled>Stop Day</button>
     </div>
     <div class="status" id="timerDisplay">Not started</div>
+    <!-- Stats display -->
     <div class="stats">
       <div>Daily XP: <span id="dailyXp">0</span></div>
       <div>Total XP: <span id="totalXp">0</span></div>
@@ -286,6 +302,22 @@
     </div>
     <!-- Reset button to clear progress -->
     <button id="resetBtn" class="reset">Reset Progress</button>
+    <!-- Friends section: manage friends and compare stats -->
+    <div id="friendSection" class="analytics" style="margin-top:1.5rem; display:none;">
+      <h2>Friends</h2>
+      <div class="flex" style="gap:0.5rem;">
+        <input type="text" id="friendInput" class="task-input" placeholder="Add friend...">
+        <button id="addFriendBtn" class="secondary">Add Friend</button>
+      </div>
+      <table id="friendTable" style="margin-top:0.5rem;">
+        <thead>
+          <tr><th>Friend</th><th>Rank</th><th>Total XP</th></tr>
+        </thead>
+        <tbody>
+          <!-- Populated via JavaScript -->
+        </tbody>
+      </table>
+    </div>
     <!-- Tables for ranks and XP per hour -->
     <div class="info-tables">
       <table id="rankTable">
