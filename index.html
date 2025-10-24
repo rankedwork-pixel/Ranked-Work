@@ -1,0 +1,349 @@
+<!--
+  Ranked Work MVP (8‑Tier Edition)
+  This minimal HTML app implements a daily task tracker with a timer, XP awards and rank progression.
+  It uses an external JavaScript file (main.js) rather than inline scripts. Some environments restrict inline scripts when running from the file system, so loading the script separately avoids those issues.
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Ranked Work</title>
+  <style>
+    /* League of Legends inspired dark fantasy theme */
+    body {
+      /* Use a classic serif font reminiscent of fantasy games for the overall tone */
+      font-family: Georgia, 'Times New Roman', serif;
+      margin: 0;
+      padding: 0;
+      /* Use decorative background image and dark overlay */
+      background: url('background.png') no-repeat center center fixed;
+      background-size: cover;
+      color: #d8d8d8;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      min-height: 100vh;
+    }
+    header {
+      width: 100%;
+      text-align: center;
+      padding: 1rem;
+      background: rgba(0, 0, 0, 0.7);
+      border-bottom: 2px solid #c59a56;
+      color: #f5e6c8;
+      text-shadow: 2px 2px 4px #000;
+    }
+    .container {
+      width: 90%;
+      max-width: 760px;
+      margin: 1.5rem auto;
+      background: rgba(16, 24, 32, 0.88);
+      padding: 1.5rem;
+      border-radius: 10px;
+      border: 2px solid #c59a56;
+      box-shadow: 0 6px 14px rgba(0, 0, 0, 0.6);
+    }
+    .flex {
+      display: flex;
+    }
+    .task-input {
+      flex: 1;
+      padding: 0.5rem;
+      border: 1px solid #39414f;
+      border-radius: 4px;
+      margin-right: 0.5rem;
+      background: #0e1522;
+      color: #cfcfcf;
+    }
+    button {
+      padding: 0.5rem 1rem;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 0.95rem;
+      transition: background 0.2s, opacity 0.2s;
+    }
+    button.primary {
+      background: #1c3970;
+      color: #f5e6c8;
+      font-weight: bold;
+      border: 1px solid #2f4e8d;
+    }
+    button.secondary {
+      background: #77461b;
+      color: #f5e6c8;
+      font-weight: bold;
+      border: 1px solid #8a5523;
+    }
+    button.reset {
+      background: #591a2d;
+      color: #f5e6c8;
+      margin-top: 0.5rem;
+      font-weight: bold;
+      border: 1px solid #7a243f;
+    }
+    button:hover:not(:disabled) {
+      opacity: 0.85;
+    }
+    button:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+    ul {
+      list-style: none;
+      padding: 0;
+      margin-top: 1rem;
+    }
+    li {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0.5rem 0;
+      border-bottom: 1px solid #39414f;
+      color: #d1dbe5;
+    }
+    li:last-child {
+      border-bottom: none;
+    }
+    .task-title {
+      flex: 1;
+      margin-left: 0.5rem;
+    }
+
+    /* Action buttons for edit and remove */
+    .task-actions {
+      display: flex;
+      align-items: center;
+      gap: 0.25rem;
+      margin-left: 0.5rem;
+    }
+    .task-actions button {
+      background: none;
+      border: none;
+      color: #c59a56;
+      cursor: pointer;
+      font-size: 0.9rem;
+      padding: 0 4px;
+      display: inline-flex;
+      align-items: center;
+    }
+    .task-actions button:hover {
+      color: #f5e6c8;
+    }
+    .status {
+      margin-top: 1rem;
+      font-size: 1.1rem;
+      color: #e6e6e6;
+    }
+    .stats {
+      margin-top: 1rem;
+      background: rgba(10, 17, 27, 0.85);
+      padding: 0.75rem;
+      border-radius: 6px;
+      border: 1px solid #4b3a23;
+      box-shadow: inset 0 0 5px rgba(0,0,0,0.6);
+    }
+    .stats div {
+      margin: 0.25rem 0;
+    }
+    /* Progress bar styles */
+    .progress-container {
+      margin-top: 0.75rem;
+      display: flex;
+      align-items: center;
+      height: 26px;
+      background: rgba(12, 20, 30, 0.9);
+      border: 1px solid #4b3a23;
+      border-radius: 6px;
+      overflow: hidden;
+    }
+    .progress-bar {
+      height: 14px;
+      /* Remove flex-grow so width can be controlled dynamically via style */
+      width: 0;
+      background: linear-gradient(90deg, #c59a56, #d4af37);
+      transition: width 0.5s;
+      border-radius: 0 4px 4px 0;
+    }
+    .progress-icon {
+      width: 24px;
+      height: 24px;
+      margin: 0 6px;
+    }
+    /* Tables for ranks and XP per hour */
+    .info-tables {
+      margin-top: 1.5rem;
+      display: flex;
+      flex-direction: column;
+      gap: 1rem;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      background: rgba(12, 20, 30, 0.85);
+      color: #e0e0e0;
+      border: 1px solid #4b3a23;
+    }
+    th, td {
+      padding: 0.5rem;
+      border: 1px solid #4b3a23;
+      text-align: center;
+    }
+    th {
+      background: rgba(28, 51, 96, 0.7);
+      font-weight: bold;
+      color: #f5e6c8;
+    }
+    tr:nth-child(even) td {
+      background: rgba(18, 28, 42, 0.9);
+    }
+    tr:nth-child(odd) td {
+      background: rgba(16, 26, 38, 0.9);
+    }
+
+    /* Highlight row of current rank */
+    .active-rank td {
+      /* Use a more opaque golden fill to make the rank stand out */
+      background: rgba(197, 154, 86, 0.8);
+      font-weight: bold;
+      /* Keep the text light so it remains readable on the dark table */
+      color: #f5e6c8;
+    }
+
+    /* Analytics section */
+    .analytics {
+      margin-top: 1.5rem;
+    }
+    .analytics h2 {
+      margin-bottom: 0.5rem;
+      color: #d4af37;
+      text-shadow: 1px 1px 2px #000;
+    }
+    .analytics .summary {
+      margin-top: 0.5rem;
+      padding: 0.5rem;
+      background: rgba(12, 20, 30, 0.85);
+      border: 1px solid #4b3a23;
+      border-radius: 6px;
+      color: #e0e0e0;
+    }
+    .analytics .summary div {
+      margin: 0.25rem 0;
+    }
+
+    /* Icon styling */
+    .rank-icon {
+      width: 32px;
+      height: 32px;
+    }
+    .current-rank-icon {
+      width: 40px;
+      height: 40px;
+      vertical-align: middle;
+      margin-right: 0.3rem;
+    }
+    .rank-display {
+      display: flex;
+      align-items: center;
+      gap: 0.25rem;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Ranked Work</h1>
+    <p>Finish your tasks fast to level up!</p>
+  </header>
+  <div class="container">
+    <div class="flex">
+      <input type="text" id="taskInput" class="task-input" placeholder="Add a task...">
+      <button id="addTaskBtn" class="primary">Add Task</button>
+    </div>
+    <ul id="taskList"></ul>
+    <div class="flex" style="margin-top: 1rem; gap: 0.5rem;">
+      <button id="startBtn" class="primary">Start Day</button>
+      <button id="pauseBtn" class="secondary" disabled>Pause</button>
+      <button id="stopBtn" class="secondary" disabled>Stop Day</button>
+    </div>
+    <div class="status" id="timerDisplay">Not started</div>
+    <div class="stats">
+      <div>Daily XP: <span id="dailyXp">0</span></div>
+      <div>Total XP: <span id="totalXp">0</span></div>
+      <div class="rank-display">Rank:
+        <img id="currentRankIcon" class="current-rank-icon" src="emblems/bronze.png" alt="Current rank">
+        <span id="rank">Bronze</span>
+      </div>
+      <!-- Placement progress or LP indicator. These elements are toggled by the script. -->
+      <div id="placementsInfo" style="display:none;">Placements: <span id="placementsCount">0</span></div>
+      <div id="lpInfo" style="display:none;">LP: <span id="lpValue">0</span> / 100</div>
+    </div>
+    <!-- Progress bar to show progress toward next rank -->
+    <div class="progress-container">
+      <img id="progressCurrentIcon" class="progress-icon" src="emblems/bronze.png" alt="Current rank">
+      <div class="progress-bar" id="progressBar"></div>
+      <img id="progressNextIcon" class="progress-icon" src="emblems/silver.png" alt="Next rank">
+    </div>
+    <!-- Reset button to clear progress -->
+    <button id="resetBtn" class="reset">Reset Progress</button>
+    <!-- Tables for ranks and XP per hour -->
+    <div class="info-tables">
+      <table id="rankTable">
+        <thead>
+          <tr><th>Emblem</th><th>Rank</th><th>Baseline XP</th></tr>
+        </thead>
+        <tbody>
+          <!-- Populated via JavaScript -->
+        </tbody>
+      </table>
+      <table id="hourTable">
+        <thead>
+          <tr>
+            <th>Hours Worked</th>
+            <th>Outcome</th>
+          </tr>
+        </thead>
+        <tbody>
+          <!-- Populated via JavaScript -->
+        </tbody>
+      </table>
+    </div>
+    <!-- Analytics section for match history and statistics -->
+    <div id="analytics" class="analytics">
+      <h2>Analytics</h2>
+      <table id="historyTable">
+        <thead>
+          <tr>
+            <th>Date</th>
+            <th>Day</th>
+            <th>Start</th>
+            <th>End</th>
+            <th>Hours</th>
+            <th>Tasks</th>
+            <th>XP</th>
+            <th>Time / Task</th>
+          </tr>
+        </thead>
+        <tbody>
+          <!-- Populated via JavaScript -->
+        </tbody>
+      </table>
+      <div class="summary">
+        <div>Average Hours: <span id="avgHours">0</span></div>
+        <div>Average Tasks: <span id="avgTasks">0</span></div>
+        <div>Average Time/Task: <span id="avgTimePerTask">0</span></div>
+      </div>
+      <!-- Pagination controls for history (show 5 rows at a time) -->
+      <div class="history-nav" style="margin-top: 0.5rem; display: flex; align-items: center; gap: 0.5rem;">
+        <button id="prevHistoryPage" class="secondary">&lt;</button>
+        <span id="historyPageInfo" style="flex-grow: 1; text-align: center;"></span>
+        <button id="nextHistoryPage" class="secondary">&gt;</button>
+      </div>
+      <!-- Export button to download history as CSV -->
+      <button id="exportCsvBtn" class="secondary" style="margin-top: 0.5rem;">Export CSV</button>
+    </div>
+  </div>
+  <!-- Load the application logic from an external file to avoid inline script restrictions -->
+  <script src="main.js"></script>
+</body>
+</html>
