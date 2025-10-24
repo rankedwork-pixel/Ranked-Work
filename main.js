@@ -10,34 +10,20 @@
 // Helper for selecting elements by id
 const $ = (id) => document.getElementById(id);
 
-// ===== Supabase auth helpers =====
-let currentUserName = null;
-
-// Accept real emails OR plain usernames (mapped to @rankedwork.local)
-function normalizeId(input) {
-  const s = (input || '').trim().toLowerCase();
-  if (!s) return '';
-  return s.includes('@') ? s : `${s.replace(/[^a-z0-9._-]/g, '')}@rankedwork.local`;
-}
-const displayName = (emailLike) => (emailLike || '').split('@')[0];
-
+// ===== Supabase helpers and UI error handling =====
+// Show an error message in the login form
 function showError(msg) {
   const el = $('loginError');
-  if (el) { el.textContent = msg || 'Invalid username or password.'; el.style.display = 'block'; }
+  if (el) {
+    el.textContent = msg || 'Invalid username or password.';
+    el.style.display = 'block';
+  }
 }
-function hideError() { const el = $('loginError'); if (el) el.style.display = 'none'; }
-
-function showLogin() {
-  $('loginContainer').style.display = 'block';
-  $('appContainer').style.display   = 'none';
-  $('signOutBtn').style.display     = 'none';
+// Hide the login form error message
+function hideError() {
+  const el = $('loginError');
+  if (el) el.style.display = 'none';
 }
-function showApp() {
-  $('loginContainer').style.display = 'none';
-  $('appContainer').style.display   = 'block';
-  $('signOutBtn').style.display     = 'inline-block';
-}
-
 // Create or fetch the user profile row (no-op if it already exists)
 async function ensureProfile(email) {
   const { data: exists } = await sb.from('profiles')
@@ -46,38 +32,6 @@ async function ensureProfile(email) {
     const { error } = await sb.from('profiles').insert({ username: email });
     if (error && error.code !== '23505') throw error;
   }
-}
-
-// Sign up (or sign in if already registered), then load state
-async function registerUser(username, password) {
-  const email = normalizeId(username);
-  if (!email || (password || '').length < 6) { showError('Password must be at least 6 characters.'); return false; }
-
-  const { error: e1 } = await sb.auth.signUp({ email, password });
-  if (e1 && !/registered/i.test(e1.message)) { showError(e1.message); return false; }
-
-  // Make sure a profile exists
-  try { await ensureProfile(email); } catch (e) { showError(e.message); return false; }
-
-  // If already registered, sign in
-  if (e1 && /registered/i.test(e1.message)) {
-    const { error: e2 } = await sb.auth.signInWithPassword({ email, password });
-    if (e2) { showError(e2.message); return false; }
-  }
-
-  const { data: { user } } = await sb.auth.getUser();
-  currentUserName = user?.email || email;
-  hideError(); return true;
-}
-
-async function loginUser(username, password) {
-  const email = normalizeId(username);
-  if (!email || (password || '').length < 6) { showError('Invalid username or password.'); return false; }
-  const { error } = await sb.auth.signInWithPassword({ email, password });
-  if (error) { showError(error.message); return false; }
-  const { data: { user } } = await sb.auth.getUser();
-  currentUserName = user?.email || email;
-  hideError(); return true;
 }
 
 // ------------------------------------------------------------
@@ -1040,7 +994,7 @@ window.addEventListener('DOMContentLoaded', async () => {
   $('stopBtn').addEventListener('click', stopDay);
   const pauseBtnEl = $('pauseBtn');
   if (pauseBtnEl) pauseBtnEl.addEventListener('click', togglePause);
-  $('resetBtn').addEventListener('click', resetProgress);
+  // Bind reset button later with confirmation; see below
   // Pagination and export controls
   const prevBtn = $('prevHistoryPage');
   const nextBtn = $('nextHistoryPage');
