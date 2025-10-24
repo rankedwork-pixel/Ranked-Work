@@ -180,45 +180,21 @@ function highlightRank() {
 // Multi‑user management functions
 // ------------------------------------------------------------
 
-// Load users from localStorage into the global users object
+// Supabase version - no local cache
 function loadUsers() {
-  try {
-    const stored = localStorage.getItem('rankedUsers');
-    if (stored) {
-      const parsed = JSON.parse(stored);
-      if (parsed && typeof parsed === 'object') {
-        users = parsed;
-      }
-    }
-  } catch {
-    users = {};
-  }
+  // no-op, we load a single user state via loadUserState()
 }
 
-// Persist all users and current user state to localStorage
-function saveUsers() {
-  if (currentUserName) {
-    // Update the current user's record with the latest state
-    if (!users[currentUserName]) {
-      users[currentUserName] = {};
-    }
-    const u = users[currentUserName];
-    u.totalXp = totalXp;
-    u.placementsPlayed = placementsPlayed;
-    u.placementsScores = placementsScores;
-    u.lp = lp;
-    u.rankIndex = rankIndex;
-    u.history = history;
-    // ensure friends and password are retained
-    if (!u.friends) u.friends = [];
-    if (!u.password) u.password = '';
-  }
-  localStorage.setItem('rankedUsers', JSON.stringify(users));
-  if (currentUserName) {
-    localStorage.setItem('currentUserName', currentUserName);
-  } else {
-    localStorage.removeItem('currentUserName');
-  }
+// Persist current user's state to Supabase
+async function saveUsers() {
+  if (!currentUserName) return;
+  await sb.from('profiles').upsert({
+    username: currentUserName,
+    total_xp: totalXp,
+    placements_played: placementsPlayed,
+    lp,
+    rank_index: rankIndex
+  });
 }
 
 // Show login form and hide the app
@@ -245,75 +221,67 @@ function showApp() {
 }
 
 // Initialize global state from the logged in user's data
-function loadUserState(username) {
-  const user = users[username];
-  // Initialize user fields if they don't exist
-  if (!user) return;
+async function loadUserState(username) {
+  // pull profile
+  const { data: p } = await sb.from('profiles').select('*')
+    .eq('username', username).single();
+
+  if (!p) return;
+
   currentUserName = username;
-  // Assign global variables
-  totalXp = user.totalXp || 0;
-  placementsPlayed = user.placementsPlayed || 0;
-  placementsScores = Array.isArray(user.placementsScores) ? user.placementsScores : [];
-  lp = user.lp || 0;
-  rankIndex = user.rankIndex || 0;
-  history = Array.isArray(user.history) ? user.history : [];
-  tasks = [];
-  startedAt = null;
-  pausedDuration = 0;
-  isPaused = false;
-  pauseStartedAt = null;
-  dailyXp = 0;
-  // Determine placements state
+  totalXp = p.total_xp || 0;
+  placementsPlayed = p.placements_played || 0;
+  lp = p.lp || 0;
+  rankIndex = p.rank_index || 0;
+
+  // load full history
+  const { data: rows } = await sb.from('histories').select('*')
+    .eq('username', username).order('id', { ascending: true });
+  history = rows || [];
+
+  // reset runtime state and refresh UI
+  tasks = []; startedAt = null; pausedDuration = 0; isPaused = false; pauseStartedAt = null; dailyXp = 0;
   isInPlacements = placementsPlayed < placementsCount;
-  // Set isPaused and timer as not running
   if (timerInterval) clearInterval(timerInterval);
   timerInterval = null;
-  // Update UI to reflect loaded state
+
   $('timerDisplay').textContent = 'Not started';
-  renderTasks();
-  updateTotals();
-  updateAnalytics();
-  renderFriends();
-  // Clear any previous completion message
+  renderTasks(); updateTotals(); updateAnalytics(); renderFriends();
   $('dailyXp').textContent = '0';
 }
 
-// Register a new user and log them in. Returns true on success.
-function registerUser(username, password) {
-  // Trim whitespace and ensure non-empty username
-  const name = username.trim();
-  if (!name) return false;
-  if (users[name]) {
-    return false; // user already exists
-  }
-  // Create a new user object with default fields
-  users[name] = {
-    password: password || '',
-    totalXp: 0,
-    placementsPlayed: 0,
-    placementsScores: [],
-    lp: 0,
-    rankIndex: 0,
-    history: [],
-    friends: []
-  };
-  saveUsers();
-  loadUserState(name);
+// We synthesize an email from the username the user types
+function toEmail(name) {
+  return `${name.trim()}@rankedwork.local`;
+}
+
+// Register a new user and log them in
+async function registerUser(username, password) {
+  const email = toEmail(username);
+  if (!username.trim()) return false;
+
+  const { error: e1 } = await sb.auth.signUp({ email, password });
+  if (e1) return false;
+
+  // create profile row
+  const { error: e2 } = await sb.from('profiles').insert({ username: email });
+  if (e2) return false;
+
+  currentUserName = email;
+  await loadUserState(email);
   return true;
 }
 
-// Log in an existing user. Returns true on success.
-function loginUser(username, password) {
-  const name = username.trim();
-  if (!name) return false;
-  const user = users[name];
-  if (!user) return false;
-  // If a password is stored, verify it
-  if (user.password && user.password !== password) {
-    return false;
-  }
-  loadUserState(name);
-  saveUsers();
+// Login an existing user
+async function loginUser(username, password) {
+  const email = toEmail(username);
+  if (!username.trim()) return false;
+
+  const { error } = await sb.auth.signInWithPassword({ email, password });
+  if (error) return false;
+
+  currentUserName = email;
+  await loadUserState(email);
   return true;
 }
 
@@ -347,65 +315,51 @@ function logoutUser() {
 }
 
 // Render the current user's friend list and their stats
-function renderFriends() {
-  const tableBody = document.querySelector('#friendTable tbody');
-  if (!tableBody) return;
-  tableBody.innerHTML = '';
-  if (!currentUserName) return;
-  const u = users[currentUserName];
-  if (!u || !Array.isArray(u.friends)) return;
-  u.friends.forEach((fname) => {
-    const friend = users[fname];
-    if (!friend) return;
+async function renderFriends() {
+  const tbody = document.querySelector('#friendTable tbody');
+  if (!tbody || !currentUserName) return;
+
+  const { data: rows } = await sb.from('friends').select('friend')
+    .eq('owner', currentUserName);
+
+  tbody.innerHTML = '';
+  for (const r of rows || []) {
+    const { data: prof } = await sb.from('profiles')
+      .select('total_xp, rank_index').eq('username', r.friend).single();
+
     const tr = document.createElement('tr');
-    const tdName = document.createElement('td');
-    tdName.textContent = fname;
-    const tdRank = document.createElement('td');
-    // Determine friend rank from their rankIndex or totalXp
-    let fRankName = '';
-    if (typeof friend.rankIndex === 'number' && ranks[friend.rankIndex]) {
-      fRankName = ranks[friend.rankIndex].name;
-    } else {
-      // fallback: compute rank from totalXp using getRank
-      fRankName = getRank(friend.totalXp || 0);
-    }
-    tdRank.textContent = fRankName;
-    const tdXp = document.createElement('td');
-    tdXp.textContent = friend.totalXp || 0;
-    tr.appendChild(tdName);
-    tr.appendChild(tdRank);
-    tr.appendChild(tdXp);
-    tableBody.appendChild(tr);
-  });
+    const name = r.friend.split('@')[0];
+    const rankName = ranks[prof?.rank_index || 0]?.name || 'Bronze';
+
+    tr.innerHTML = `<td>${name}</td><td>${rankName}</td><td>${prof?.total_xp || 0}</td>`;
+    tbody.appendChild(tr);
+  }
 }
 
 // Add a friend to the current user's friend list
-function addFriend() {
+async function addFriend() {
   if (!currentUserName) return;
   const input = $('friendInput');
   if (!input) return;
+
   const friendName = input.value.trim();
   if (!friendName) return;
-  if (friendName === currentUserName) {
-    alert('You cannot add yourself as a friend.');
-    return;
-  }
-  if (!users[friendName]) {
-    alert('User not found.');
-    return;
-  }
-  const u = users[currentUserName];
-  if (!u.friends) u.friends = [];
-  if (u.friends.includes(friendName)) {
-    alert('Friend already added.');
-    input.value = '';
-    return;
-  }
-  u.friends.push(friendName);
+  const friendEmail = `${friendName}@rankedwork.local`;
+  if (friendEmail === currentUserName) return alert('You cannot add yourself.');
+
+  // verify friend exists
+  const { data: exists } = await sb.from('profiles')
+    .select('username').eq('username', friendEmail).maybeSingle();
+  if (!exists) return alert('User not found.');
+
+  // add row
+  const { error } = await sb.from('friends')
+    .insert({ owner: currentUserName, friend: friendEmail });
+  if (error) return alert('Could not add friend.');
+
   input.value = '';
-  renderFriends();
-  saveUsers();
-  alert(`${friendName} added to your friends list.`);
+  await renderFriends();
+  alert(`${friendName} added`);
 }
 
 // Update total XP and rank display
@@ -786,6 +740,19 @@ function stopDay() {
     historyEntry.lpChange = null;
     historyEntry.lpAfter = null;
   }
+  await sb.from('histories').insert({
+  username: currentUserName,
+  date: historyEntry.date,
+  day: historyEntry.day,
+  start: historyEntry.start,
+  end: historyEntry.end,
+  hours: historyEntry.hours,
+  tasks: historyEntry.tasks,
+  xp: historyEntry.xp,
+  time_per_task: historyEntry.timePerTask,
+  lp_change: historyEntry.lpChange ?? null,
+  lp_after: historyEntry.lpAfter ?? null
+});
   history.push(historyEntry);
   // Persist user data after updating history
   saveUsers();
