@@ -18,8 +18,8 @@ const $ = (id) => document.getElementById(id);
 // for table definitions. NOTE: Do not commit your secret service role
 // key; only use the public anon key here.
 
-const SUPABASE_URL = '';
-const SUPABASE_ANON_KEY = '';
+const SUPABASE_URL = 'https://ktijxkeylmllpijrzkyd.supabase.co';
+const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imt0aWp4a2V5bG1sbHBpanJ6a3lkIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjEyNTUwOTEsImV4cCI6MjA3NjgzMTA5MX0.z3cHnnlgwa1BUpOsiA36F3EvTpLkK8WHkOKRB9CiLXA';
 let supabase = null;
 let useSupabase = false;
 
