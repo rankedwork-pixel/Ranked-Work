@@ -375,13 +375,13 @@
       <button id="exportCsvBtn" class="secondary" style="margin-top: 0.5rem;">Export CSV</button>
     </div>
   </div>
-  <!-- Load the application logic from an external file to avoid inline script restrictions -->
-  <!-- Supabase client and initialization. Replace the URL and key with your actual Supabase project details. -->
+  <!-- Supabase client library and initialization -->
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
   <script>
-    // Initialize Supabase.
-    window.sb = supabase.createClient('https://ktijxkeylmllpijrzkyd.supabase.co', 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imt0aWp4a2V5bG1sbHBpanJ6a3lkIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjEyNTUwOTEsImV4cCI6MjA3NjgzMTA5MX0.z3cHnnlgwa1BUpOsiA36F3EvTpLkK8WHkOKRB9CiLXA');
+    // Replace the placeholders below with your Supabase project URL and anon public key.
+    window.sb = supabase.createClient('https://YOUR_PROJECT_URL', 'YOUR_ANON_PUBLIC_KEY');
   </script>
+  <!-- Load the application logic from an external file to avoid inline script restrictions -->
   <script src="main.js"></script>
 </body>
 </html>

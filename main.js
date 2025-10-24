@@ -1,8 +1,11 @@
-// Ranked Work application logic (multi‑user edition)
-// This script implements a productivity tracker with ranked progression, placement
-// matches, LP system and analytics. It has been extended to support multiple
-// user profiles with login and registration, basic password storage, and a
-// lightweight friends system. User data is persisted in localStorage.
+// Ranked Work application logic (Supabase edition)
+// This script implements a productivity tracker with ranked progression,
+// placement matches, LP system and analytics. It uses Supabase for
+// persistent storage of profiles, histories and friends. Users can
+// register with either a real email or a simple username; behind the
+// scenes a synthetic email of the form <username>@rankedwork.local is
+// generated when no @ is present. Friends and history data are stored
+// centrally, allowing access across devices and sessions.
 
 // Helper for selecting elements by id
 const $ = (id) => document.getElementById(id);
@@ -10,12 +13,7 @@ const $ = (id) => document.getElementById(id);
 // ------------------------------------------------------------
 // Global state
 // ------------------------------------------------------------
-// A map of all users keyed by username. Each user object stores
-// persistent fields: password, totalXp, placementsPlayed, placementsScores,
-// lp, rankIndex, history (array), and friends (array of usernames).
-// When using Supabase for persistence, this object is unused but retained for backward compatibility.
-let users = {};
-// The name of the currently logged‑in user (null if no user logged in)
+// The name of the currently logged‑in user (email string) or null
 let currentUserName = null;
 // Application state for the current session. These variables mirror fields
 // stored for each user and are loaded when a user logs in.
@@ -34,11 +32,6 @@ let rankIndex = 0;
 let history = [];
 // When placements are complete, isInPlacements becomes false
 let isInPlacements = true;
-
-// Helper to convert a simple username into an email address used by Supabase.
-function toEmail(name) {
-  return `${name.trim()}@rankedwork.local`;
-}
 
 // Number of placement games required before rank is determined
 const placementsCount = 10;
@@ -104,60 +97,80 @@ const B_VALUE = 0.25;
 const historyPageSize = 5;
 let historyPageIndex = 0;
 
+// ------------------------------------------------------------
+// Supabase helpers and normalisation
+// ------------------------------------------------------------
+// Convert a user input into a valid identifier. If the input already
+// looks like an email (contains '@'), it is returned unchanged. Otherwise
+// a synthetic email in the rankedwork.local domain is produced.
+function normalizeId(input) {
+  const s = (input || '').trim().toLowerCase();
+  if (!s) return '';
+  return s.includes('@') ? s : `${s.replace(/[^a-z0-9._-]/g, '')}@rankedwork.local`;
+}
+
+// Convert an email-like identifier into a display name by stripping the domain.
+const displayName = (emailLike) => (emailLike || '').split('@')[0];
+
+// ------------------------------------------------------------
+// UI helper functions
+// ------------------------------------------------------------
+
 // Populate rank and hour tables on DOM load
 function populateTables() {
   // Populate rank table
   const rankBody = document.querySelector('#rankTable tbody');
-  rankBody.innerHTML = '';
-  ranks.forEach((rank, index) => {
-    const tr = document.createElement('tr');
-    // Emblem cell
-    const tdIcon = document.createElement('td');
-    const img = document.createElement('img');
-    img.src = `emblems/${rank.name.toLowerCase()}.png`;
-    img.alt = `${rank.name} emblem`;
-    img.className = 'rank-icon';
-    tdIcon.appendChild(img);
-    // Name cell
-    const tdName = document.createElement('td');
-    tdName.textContent = rank.name;
-    // Min XP cell
-    const tdMin = document.createElement('td');
-    // Display the baseline XP value instead of the old minimum XP threshold.
-    // Baselines correspond by index to the ranks array.
-    const baseline = rankBaselines[index];
-    tdMin.textContent = baseline.toLocaleString();
-    tr.appendChild(tdIcon);
-    tr.appendChild(tdName);
-    tr.appendChild(tdMin);
-    rankBody.appendChild(tr);
-  });
+  if (rankBody) {
+    rankBody.innerHTML = '';
+    ranks.forEach((rank, index) => {
+      const tr = document.createElement('tr');
+      // Emblem cell
+      const tdIcon = document.createElement('td');
+      const img = document.createElement('img');
+      img.src = `emblems/${rank.name.toLowerCase()}.png`;
+      img.alt = `${rank.name} emblem`;
+      img.className = 'rank-icon';
+      tdIcon.appendChild(img);
+      // Name cell
+      const tdName = document.createElement('td');
+      tdName.textContent = rank.name;
+      // Min XP cell: display baseline XP instead of static threshold
+      const tdMin = document.createElement('td');
+      const baseline = rankBaselines[index];
+      tdMin.textContent = baseline.toLocaleString();
+      tr.appendChild(tdIcon);
+      tr.appendChild(tdName);
+      tr.appendChild(tdMin);
+      rankBody.appendChild(tr);
+    });
+    // Highlight the current rank row
+    highlightRank();
+  }
   // Populate XP per hour table (1 to 8 hours)
   const hourBody = document.querySelector('#hourTable tbody');
-  hourBody.innerHTML = '';
-  for (let hours = 1; hours <= 8; hours++) {
-    const tr = document.createElement('tr');
-    const thours = document.createElement('td');
-    thours.textContent = hours;
-    // Determine outcome. For simplicity, consider hours 1–4 as wins and 5–8 as losses.
-    const outcomeCell = document.createElement('td');
-    if (hours <= 4) {
-      outcomeCell.textContent = 'Win';
-      outcomeCell.style.color = '#8cdf6c'; // greenish for wins
-    } else {
-      outcomeCell.textContent = 'Loss';
-      outcomeCell.style.color = '#e88c8c'; // reddish for losses
+  if (hourBody) {
+    hourBody.innerHTML = '';
+    for (let hours = 1; hours <= 8; hours++) {
+      const tr = document.createElement('tr');
+      const thours = document.createElement('td');
+      thours.textContent = hours;
+      // Outcome: hours 1–4 are wins, 5–8 are losses
+      const outcomeCell = document.createElement('td');
+      if (hours <= 4) {
+        outcomeCell.textContent = 'Win';
+        outcomeCell.style.color = '#8cdf6c';
+      } else {
+        outcomeCell.textContent = 'Loss';
+        outcomeCell.style.color = '#e88c8c';
+      }
+      tr.appendChild(thours);
+      tr.appendChild(outcomeCell);
+      hourBody.appendChild(tr);
     }
-    tr.appendChild(thours);
-    tr.appendChild(outcomeCell);
-    hourBody.appendChild(tr);
   }
-
-  // After tables are populated, highlight the current rank row
-  highlightRank();
 }
 
-// Determine rank name based on total XP
+// Determine rank name based on total XP (fallback when rankIndex undefined)
 function getRank(total) {
   for (let i = ranks.length - 1; i >= 0; i--) {
     if (total >= ranks[i].min) return ranks[i].name;
@@ -172,37 +185,12 @@ function highlightRank() {
   const currentRank = ranks[rankIndex]?.name || ranks[0].name;
   const rows = document.querySelectorAll('#rankTable tbody tr');
   rows.forEach((tr) => {
-    // Name cell is at index 1 because index 0 is emblem
     const nameCell = tr.children[1];
     if (nameCell && nameCell.textContent === currentRank) {
       tr.classList.add('active-rank');
     } else {
       tr.classList.remove('active-rank');
     }
-  });
-}
-
-// ------------------------------------------------------------
-// Multi‑user management functions
-// ------------------------------------------------------------
-
-// Load users from localStorage into the global users object
-function loadUsers() {
-  // When using Supabase for persistence, there is no need to load local users.
-  // This function intentionally left blank.
-}
-
-// Persist all users and current user state to localStorage
-async function saveUsers() {
-  // Persist the current user's state to Supabase. When no user is logged in,
-  // nothing is saved.
-  if (!currentUserName) return;
-  await sb.from('profiles').upsert({
-    username: currentUserName,
-    total_xp: totalXp,
-    placements_played: placementsPlayed,
-    lp: lp,
-    rank_index: rankIndex
   });
 }
 
@@ -224,61 +212,136 @@ function showApp() {
   if (loginContainer) loginContainer.style.display = 'none';
   if (appContainer) appContainer.style.display = 'block';
   if (signOutBtn) signOutBtn.style.display = 'inline-block';
-  // Show friend section if user has any friends (always visible after login)
   const friendSection = $('friendSection');
   if (friendSection) friendSection.style.display = 'block';
 }
 
-// Initialize global state from the logged in user's data
-function loadUserState(username) {
-  const user = users[username];
-  // Initialize user fields if they don't exist
-  if (!user) return;
-  currentUserName = username;
-  // Assign global variables
-  totalXp = user.totalXp || 0;
-  placementsPlayed = user.placementsPlayed || 0;
-  placementsScores = Array.isArray(user.placementsScores) ? user.placementsScores : [];
-  lp = user.lp || 0;
-  rankIndex = user.rankIndex || 0;
-  history = Array.isArray(user.history) ? user.history : [];
-  tasks = [];
-  startedAt = null;
-  pausedDuration = 0;
-  isPaused = false;
-  pauseStartedAt = null;
-  dailyXp = 0;
-  // Determine placements state
-  isInPlacements = placementsPlayed < placementsCount;
-  // Set isPaused and timer as not running
-  if (timerInterval) clearInterval(timerInterval);
-  timerInterval = null;
-  // Update UI to reflect loaded state
-  $('timerDisplay').textContent = 'Not started';
-  renderTasks();
-  updateTotals();
-  updateAnalytics();
-  renderFriends();
-  // Clear any previous completion message
-  $('dailyXp').textContent = '0';
+// ------------------------------------------------------------
+// Supabase-backed user management
+// ------------------------------------------------------------
+
+// Load user state from Supabase into global variables and refresh UI
+async function loadUserState(username) {
+  try {
+    const { data: p } = await sb.from('profiles').select('*').eq('username', username).single();
+    if (!p) return;
+    currentUserName = username;
+    totalXp = p.total_xp || 0;
+    placementsPlayed = p.placements_played || 0;
+    lp = p.lp || 0;
+    rankIndex = p.rank_index || 0;
+    // Reset session-specific variables
+    tasks = [];
+    startedAt = null;
+    pausedDuration = 0;
+    isPaused = false;
+    pauseStartedAt = null;
+    dailyXp = 0;
+    // Determine placements state
+    isInPlacements = placementsPlayed < placementsCount;
+    // Reset any running timer
+    if (timerInterval) clearInterval(timerInterval);
+    timerInterval = null;
+    // Load history entries
+    const { data: rows } = await sb.from('histories').select('*').eq('username', username).order('id', { ascending: true });
+    history = rows || [];
+    // Update UI
+    $('timerDisplay').textContent = 'Not started';
+    renderTasks();
+    updateTotals();
+    updateAnalytics();
+    await renderFriends();
+    $('dailyXp').textContent = '0';
+  } catch (err) {
+    console.error('loadUserState error:', err);
+  }
 }
 
-// Register a new user and log them in. Returns true on success.
-function registerUser(username, password) {
-  // Synchronous registration is no longer supported. Use registerUserAsync instead.
-  return false;
+// Persist current user's state to Supabase
+async function saveUsers() {
+  if (!currentUserName) return;
+  try {
+    await sb.from('profiles').upsert({
+      username: currentUserName,
+      total_xp: totalXp,
+      placements_played: placementsPlayed,
+      lp: lp,
+      rank_index: rankIndex
+    });
+  } catch (err) {
+    console.error('saveUsers error:', err);
+  }
 }
 
-// Log in an existing user. Returns true on success.
-function loginUser(username, password) {
-  // Synchronous login is no longer supported. Use loginUserAsync instead.
-  return false;
+// Register a new user or log in if already registered. Accepts either
+// real emails or plain usernames. Returns true on success.
+async function registerUser(username, password) {
+  const email = normalizeId(username);
+  if (!email || (password || '').length < 6) return false;
+  try {
+    // Attempt sign-up
+    const { error: e1 } = await sb.auth.signUp({ email, password });
+    // If there's an error other than "registered" fail
+    if (e1 && !/registered/i.test(e1.message)) {
+      console.error('signUp error:', e1);
+      return false;
+    }
+    // Ensure a profile row exists
+    const { data: exists } = await sb.from('profiles').select('username').eq('username', email).maybeSingle();
+    if (!exists) {
+      const { error: e2 } = await sb.from('profiles').insert({ username: email });
+      if (e2 && e2.code !== '23505') {
+        console.error('profiles insert error:', e2);
+        return false;
+      }
+    }
+    // If user already registered, sign them in
+    if (e1 && /registered/i.test(e1.message)) {
+      const { error: e3 } = await sb.auth.signInWithPassword({ email, password });
+      if (e3) {
+        console.error('signIn after registered error:', e3);
+        return false;
+      }
+    }
+    // At this point we should have a session
+    const { data: { user } } = await sb.auth.getUser();
+    currentUserName = user?.email || email;
+    await loadUserState(currentUserName);
+    return true;
+  } catch (err) {
+    console.error('registerUser error:', err);
+    return false;
+  }
+}
+
+// Log in an existing user. Accepts either emails or usernames.
+async function loginUser(username, password) {
+  const email = normalizeId(username);
+  if (!email || (password || '').length < 6) return false;
+  try {
+    const { error } = await sb.auth.signInWithPassword({ email, password });
+    if (error) {
+      console.error('signIn error:', error);
+      return false;
+    }
+    const { data: { user } } = await sb.auth.getUser();
+    currentUserName = user?.email || email;
+    await loadUserState(currentUserName);
+    return true;
+  } catch (err) {
+    console.error('loginUser error:', err);
+    return false;
+  }
 }
 
 // Log out the current user and reset state
 async function logoutUser() {
-  // Persist current user state
   await saveUsers();
+  try {
+    await sb.auth.signOut();
+  } catch (err) {
+    console.error('signOut error:', err);
+  }
   // Reset global state
   currentUserName = null;
   tasks = [];
@@ -300,301 +363,83 @@ async function logoutUser() {
   renderTasks();
   updateTotals();
   updateAnalytics();
-  // Hide app and show login
   showLogin();
 }
 
-// --------------------------------------------------------------------
-// Supabase-based user management
-// --------------------------------------------------------------------
-
-// Register a new user using Supabase and log them in. Returns true on success.
-async function registerUserAsync(username, password) {
-  const name = username.trim();
-  if (!name) return false;
-  const email = toEmail(name);
-  // Sign up the user in Supabase auth
-  const { error: authError } = await sb.auth.signUp({ email, password });
-  if (authError) {
-    return false;
-  }
-  // Create a corresponding profile row
-  const { error: profileError } = await sb.from('profiles').insert({ username: email });
-  if (profileError) {
-    return false;
-  }
-  currentUserName = email;
-  await loadUserStateAsync(email);
-  return true;
-}
-
-// Log in an existing user via Supabase. Returns true on success.
-async function loginUserAsync(username, password) {
-  const name = username.trim();
-  if (!name) return false;
-  const email = toEmail(name);
-  const { error: signInError } = await sb.auth.signInWithPassword({ email, password });
-  if (signInError) {
-    return false;
-  }
-  currentUserName = email;
-  await loadUserStateAsync(email);
-  return true;
-}
-
-// Load user state from Supabase and populate globals and UI.
-async function loadUserStateAsync(username) {
-  const { data: profile } = await sb.from('profiles').select('*').eq('username', username).maybeSingle();
-  if (!profile) return;
-  currentUserName = username;
-  totalXp = profile.total_xp || 0;
-  placementsPlayed = profile.placements_played || 0;
-  lp = profile.lp || 0;
-  rankIndex = profile.rank_index || 0;
-  tasks = [];
-  startedAt = null;
-  pausedDuration = 0;
-  isPaused = false;
-  pauseStartedAt = null;
-  dailyXp = 0;
-  isInPlacements = placementsPlayed < placementsCount;
-  if (timerInterval) clearInterval(timerInterval);
-  timerInterval = null;
-  $('timerDisplay').textContent = 'Not started';
-  // Load history
-  const { data: rows } = await sb.from('histories').select('*').eq('username', username).order('id', { ascending: true });
-  history = rows || [];
-  // Refresh UI
-  renderTasks();
-  updateTotals();
-  updateAnalytics();
-  await renderFriendsAsync();
-  $('dailyXp').textContent = '0';
-}
-
-// Render friends by querying Supabase.
-async function renderFriendsAsync() {
-  const tableBody = document.querySelector('#friendTable tbody');
-  if (!tableBody) return;
-  tableBody.innerHTML = '';
-  if (!currentUserName) return;
-  const { data: friendRows } = await sb.from('friends').select('friend').eq('owner', currentUserName);
-  const list = friendRows || [];
-  for (const fr of list) {
-    const friendEmail = fr.friend;
-    const { data: prof } = await sb.from('profiles').select('total_xp, rank_index').eq('username', friendEmail).maybeSingle();
-    const tr = document.createElement('tr');
-    const nameCell = document.createElement('td');
-    nameCell.textContent = friendEmail.split('@')[0];
-    const rankCell = document.createElement('td');
-    const rankName = ranks[prof?.rank_index || 0]?.name || 'Bronze';
-    rankCell.textContent = rankName;
-    const xpCell = document.createElement('td');
-    xpCell.textContent = prof?.total_xp || 0;
-    tr.appendChild(nameCell);
-    tr.appendChild(rankCell);
-    tr.appendChild(xpCell);
-    tableBody.appendChild(tr);
-  }
-}
-
-// Add a friend via Supabase by username.
-async function addFriendAsync() {
-  if (!currentUserName) return;
-  const input = $('friendInput');
-  if (!input) return;
-  const friendName = input.value.trim();
-  if (!friendName) return;
-  const friendEmail = `${friendName}@rankedwork.local`;
-  if (friendEmail === currentUserName) {
-    alert('You cannot add yourself.');
-    return;
-  }
-  const { data: exists } = await sb.from('profiles').select('username').eq('username', friendEmail).maybeSingle();
-  if (!exists) {
-    alert('User not found.');
-    return;
-  }
-  const { error: insertError } = await sb.from('friends').insert({ owner: currentUserName, friend: friendEmail });
-  if (insertError) {
-    alert('Failed to add friend.');
-    return;
-  }
-  input.value = '';
-  await renderFriendsAsync();
-  alert(`${friendName} added`);
-}
-
 // Render the current user's friend list and their stats
-function renderFriends() {
+async function renderFriends() {
   const tableBody = document.querySelector('#friendTable tbody');
   if (!tableBody) return;
   tableBody.innerHTML = '';
   if (!currentUserName) return;
-  const u = users[currentUserName];
-  if (!u || !Array.isArray(u.friends)) return;
-  u.friends.forEach((fname) => {
-    const friend = users[fname];
-    if (!friend) return;
-    const tr = document.createElement('tr');
-    const tdName = document.createElement('td');
-    tdName.textContent = fname;
-    const tdRank = document.createElement('td');
-    // Determine friend rank from their rankIndex or totalXp
-    let fRankName = '';
-    if (typeof friend.rankIndex === 'number' && ranks[friend.rankIndex]) {
-      fRankName = ranks[friend.rankIndex].name;
-    } else {
-      // fallback: compute rank from totalXp using getRank
-      fRankName = getRank(friend.totalXp || 0);
+  try {
+    const { data: rows } = await sb.from('friends').select('friend').eq('owner', currentUserName);
+    for (const r of rows || []) {
+      // Fetch friend's profile
+      const { data: prof } = await sb.from('profiles').select('total_xp, rank_index').eq('username', r.friend).single();
+      const tr = document.createElement('tr');
+      const tdName = document.createElement('td');
+      tdName.textContent = displayName(r.friend);
+      const tdRank = document.createElement('td');
+      const rankName = ranks[prof?.rank_index || 0]?.name || ranks[0].name;
+      tdRank.textContent = rankName;
+      const tdXp = document.createElement('td');
+      tdXp.textContent = prof?.total_xp || 0;
+      tr.appendChild(tdName);
+      tr.appendChild(tdRank);
+      tr.appendChild(tdXp);
+      tableBody.appendChild(tr);
     }
-    tdRank.textContent = fRankName;
-    const tdXp = document.createElement('td');
-    tdXp.textContent = friend.totalXp || 0;
-    tr.appendChild(tdName);
-    tr.appendChild(tdRank);
-    tr.appendChild(tdXp);
-    tableBody.appendChild(tr);
-  });
+  } catch (err) {
+    console.error('renderFriends error:', err);
+  }
 }
 
 // Add a friend to the current user's friend list
-function addFriend() {
+async function addFriend() {
   if (!currentUserName) return;
   const input = $('friendInput');
   if (!input) return;
-  const friendName = input.value.trim();
-  if (!friendName) return;
-  if (friendName === currentUserName) {
+  const friendNameRaw = input.value.trim();
+  if (!friendNameRaw) return;
+  const friendEmail = normalizeId(friendNameRaw);
+  if (friendEmail === currentUserName) {
     alert('You cannot add yourself as a friend.');
-    return;
-  }
-  if (!users[friendName]) {
-    alert('User not found.');
-    return;
-  }
-  const u = users[currentUserName];
-  if (!u.friends) u.friends = [];
-  if (u.friends.includes(friendName)) {
-    alert('Friend already added.');
     input.value = '';
     return;
   }
-  u.friends.push(friendName);
-  input.value = '';
-  renderFriends();
-  saveUsers();
-  alert(`${friendName} added to your friends list.`);
-}
-
-// Update total XP and rank display
-function updateTotals() {
-  // Update total XP display even though XP no longer determines rank
-  $('totalXp').textContent = totalXp;
-  // Determine the current rank name based on rankIndex
-  const rankName = ranks[rankIndex]?.name || ranks[0].name;
-  $('rank').textContent = rankName;
-  // Update progress bar and icons
-  updateProgressBar();
-  highlightRank();
-  // Update current rank emblem
-  const rankIcon = document.getElementById('currentRankIcon');
-  if (rankIcon) {
-    rankIcon.src = `emblems/${rankName.toLowerCase()}.png`;
-    rankIcon.alt = `${rankName} emblem`;
-  }
-  // Update progress bar icons: current and next rank, or placement indicator
-  const curImg = document.getElementById('progressCurrentIcon');
-  const nextImg = document.getElementById('progressNextIcon');
-  if (isInPlacements) {
-    // During placements, show Bronze as current and a placeholder next icon
-    const curName = ranks[0].name.toLowerCase();
-    const nextName = ranks[1].name.toLowerCase();
-    if (curImg) curImg.src = `emblems/${curName}.png`;
-    if (nextImg) nextImg.src = `emblems/${nextName}.png`;
-  } else {
-    const curName = ranks[rankIndex].name.toLowerCase();
-    const nextName = rankIndex < ranks.length - 1 ? ranks[rankIndex + 1].name.toLowerCase() : ranks[rankIndex].name.toLowerCase();
-    if (curImg) curImg.src = `emblems/${curName}.png`;
-    if (nextImg) nextImg.src = `emblems/${nextName}.png`;
-  }
-  // Show or hide placement and LP information
-  const placementsInfo = document.getElementById('placementsInfo');
-  const placementsCountEl = document.getElementById('placementsCount');
-  const lpInfo = document.getElementById('lpInfo');
-  const lpValueEl = document.getElementById('lpValue');
-  if (placementsInfo && placementsCountEl && lpInfo && lpValueEl) {
-    if (isInPlacements) {
-      placementsInfo.style.display = 'block';
-      lpInfo.style.display = 'none';
-      placementsCountEl.textContent = `${placementsPlayed} / ${placementsCount}`;
-    } else {
-      placementsInfo.style.display = 'none';
-      lpInfo.style.display = 'block';
-      lpValueEl.textContent = lp;
+  try {
+    // Verify the friend exists
+    const { data: exists } = await sb.from('profiles').select('username').eq('username', friendEmail).maybeSingle();
+    if (!exists) {
+      alert('User not found.');
+      input.value = '';
+      return;
     }
+    // Insert friend row; ignore duplicate key errors
+    const { error } = await sb.from('friends').insert({ owner: currentUserName, friend: friendEmail });
+    if (error && error.code !== '23505') {
+      console.error('addFriend error:', error);
+      alert('Could not add friend.');
+      input.value = '';
+      return;
+    }
+    input.value = '';
+    await renderFriends();
+    alert(`${displayName(friendEmail)} added to your friends list.`);
+  } catch (err) {
+    console.error('addFriend error:', err);
   }
 }
 
-// Update the progress bar width based on current total XP
-function updateProgressBar() {
-  const progressBar = $('progressBar');
-  if (!progressBar) return;
-  let pct;
-  if (isInPlacements) {
-    // During placements, progress is based on the number of placement games played
-    pct = (placementsPlayed / placementsCount) * 100;
-    progressBar.title = `${Math.floor(pct)}% of placements completed`;
-  } else {
-    // After placements, progress is based on LP toward next rank
-    pct = (lp / 100) * 100;
-    const nextName = rankIndex < ranks.length - 1 ? ranks[rankIndex + 1].name : ranks[rankIndex].name;
-    progressBar.title = `${Math.floor(pct)}% toward ${nextName}`;
-  }
-  progressBar.style.width = Math.max(0, Math.min(100, pct)) + '%';
-}
-
-// Reset progress handler
-function resetProgress() {
-  if (!confirm('Reset your total XP, rank progress and analytics history?')) {
-    return;
-  }
-  // Reset XP and rank
-  totalXp = 0;
-  dailyXp = 0;
-  $('dailyXp').textContent = '0';
-  // Reset placement and LP state
-  placementsPlayed = 0;
-  placementsScores = [];
-  isInPlacements = true;
-  lp = 0;
-  rankIndex = 0;
-  $('timerDisplay').textContent = 'Not started';
-  updateTotals();
-  // Clear analytics history
-  history = [];
-  // Reset pagination index
-  historyPageIndex = 0;
-  updateAnalytics();
-
-  // Reset timer and pause state
-  if (timerInterval) clearInterval(timerInterval);
-  startedAt = null;
-  isPaused = false;
-  pauseStartedAt = null;
-  pausedDuration = 0;
-  const pauseBtn = $('pauseBtn');
-  if (pauseBtn) {
-    pauseBtn.disabled = true;
-    pauseBtn.textContent = 'Pause';
-  }
-  // Persist reset to user profile
-  saveUsers();
-}
+// ------------------------------------------------------------
+// Task management and timer functions (unchanged)
+// ------------------------------------------------------------
 
 // Render the tasks list to the DOM
 function renderTasks() {
   const list = $('taskList');
+  if (!list) return;
   list.innerHTML = '';
   tasks.forEach((task) => {
     const li = document.createElement('li');
@@ -655,7 +500,6 @@ function renderTasks() {
     editBtn.title = 'Edit task';
     editBtn.textContent = '✏';
     editBtn.addEventListener('click', () => {
-      // Prompt user for new title
       const newTitle = prompt('Edit task', task.title);
       if (newTitle !== null) {
         const trimmed = newTitle.trim();
@@ -672,13 +516,11 @@ function renderTasks() {
     removeBtn.title = 'Remove task';
     removeBtn.textContent = '✖';
     removeBtn.addEventListener('click', () => {
-      // Remove task from array
       const idx = tasks.indexOf(task);
       if (idx !== -1) {
         tasks.splice(idx, 1);
         renderTasks();
         checkCompletion();
-        // If day hasn't started, update the planned tasks message
         if (!startedAt) {
           $('timerDisplay').textContent = tasks.length > 0 ? `Planned tasks: ${tasks.length}` : 'Not started';
         }
@@ -698,7 +540,6 @@ function renderTasks() {
 function checkCompletion() {
   const planned = tasks.length;
   const completed = tasks.filter((t) => t.done).length;
-  // Enable stop only if the day has started and all planned tasks are complete
   $('stopBtn').disabled = !(startedAt && planned > 0 && completed === planned);
 }
 
@@ -721,7 +562,7 @@ function updateTimer() {
 
 // Start day handler
 function startDay() {
-  if (startedAt) return; // Already running
+  if (startedAt) return;
   if (tasks.length === 0) {
     alert('Please add at least one task before starting.');
     return;
@@ -732,7 +573,6 @@ function startDay() {
   pauseStartedAt = null;
   timerInterval = setInterval(updateTimer, 500);
   $('startBtn').disabled = true;
-  // Enable the pause button and set its label
   const pauseBtn = $('pauseBtn');
   if (pauseBtn) {
     pauseBtn.disabled = false;
@@ -741,6 +581,26 @@ function startDay() {
   $('stopBtn').disabled = true;
   $('timerDisplay').textContent = '00:00:00';
   checkCompletion();
+}
+
+// Pause/resume handler
+function togglePause() {
+  if (!startedAt) return;
+  const pauseBtn = $('pauseBtn');
+  if (isPaused) {
+    if (pauseStartedAt) {
+      pausedDuration += Date.now() - pauseStartedAt;
+    }
+    pauseStartedAt = null;
+    isPaused = false;
+    if (pauseBtn) pauseBtn.textContent = 'Pause';
+    $('stopBtn').disabled = tasks.length === 0 || tasks.some((t) => !t.done);
+  } else {
+    pauseStartedAt = Date.now();
+    isPaused = true;
+    if (pauseBtn) pauseBtn.textContent = 'Resume';
+    $('stopBtn').disabled = true;
+  }
 }
 
 // Stop day handler
@@ -759,31 +619,24 @@ async function stopDay() {
   const elapsedMs = end - startedAt - pausedDuration;
   // Compute hours, clamped between 0.25 and 12
   const hours = Math.max(0.25, Math.min(12, elapsedMs / 3600000));
-  // XP formula: inverse time curve K/(hours + b)
-  const K = 1200;
-  const b = 0.25;
-  // Compute base XP from hours
-  const baseXp = Math.round(K / (hours + b));
-  // Determine bonus based on start and end times. Encourage earlier work: starting before 8am and ending before noon awards small bonuses.
+  // XP formula: inverse time curve
+  const baseXp = Math.round(K_VALUE / (hours + B_VALUE));
+  // Determine bonus based on start and end times
   const startDate = new Date(startedAt);
   const endDate = new Date(end);
   const startHour = startDate.getHours();
   const endHour = endDate.getHours();
   let bonus = 0;
-  // Starting before 8:00 awards 10% bonus
   if (startHour < 8) bonus += 0.1;
-  // Ending before 12:00 awards another 10% bonus
   if (endHour < 12) bonus += 0.1;
   if (bonus > 0.2) bonus = 0.2;
   dailyXp = Math.round(baseXp * (1 + bonus));
-  // Always show daily XP value
   $('dailyXp').textContent = dailyXp;
-  // During placements, accumulate scores and determine starting rank at the end
+  // Placement logic
   if (isInPlacements) {
     placementsScores.push(dailyXp);
     placementsPlayed++;
     if (placementsPlayed >= placementsCount) {
-      // Compute average XP across placements
       const sum = placementsScores.reduce((acc, val) => acc + val, 0);
       const avg = sum / placementsScores.length;
       rankIndex = getStartingRankIndex(avg);
@@ -793,29 +646,24 @@ async function stopDay() {
     } else {
       alert(`Placement match recorded. ${placementsPlayed} / ${placementsCount} completed.`);
     }
-    // Accumulate total XP for analytics
     totalXp += dailyXp;
     updateTotals();
   } else {
-    // After placements, determine LP gain or loss
+    // LP logic after placements
     const baseline = rankBaselines[rankIndex] || 200;
     const lpChange = calculateLpChange(dailyXp, baseline);
-    const oldLp = lp;
     lp += lpChange;
     let promoted = false;
     let demoted = false;
-    // Handle promotion
     if (lp >= 100) {
       lp -= 100;
       if (rankIndex < ranks.length - 1) {
         rankIndex++;
         promoted = true;
       } else {
-        // Clamp at max rank
         lp = 100;
       }
     }
-    // Handle demotion
     if (lp < 0) {
       lp += 100;
       if (rankIndex > 0) {
@@ -825,9 +673,7 @@ async function stopDay() {
         lp = 0;
       }
     }
-    // Accumulate total XP for analytics (still tracked for curiosity)
     totalXp += dailyXp;
-    // Inform user of result
     const changeText = lpChange > 0 ? `gained ${lpChange} LP` : `lost ${Math.abs(lpChange)} LP`;
     let message = `Match complete: you ${changeText}.`;
     if (promoted) {
@@ -838,14 +684,13 @@ async function stopDay() {
     alert(message);
     updateTotals();
   }
-  // Record analytics entry before resetting tasks. We also include LP change
+  // Record analytics entry before resetting tasks.
   const completedTasks = tasks.length;
-  // Format start and end times as HH:MM using the user's locale
   const startStr = startDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   const endStr = endDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-  // Determine day of week from the start date
   const dayOfWeek = startDate.toLocaleDateString([], { weekday: 'short' });
   const historyEntry = {
+    username: currentUserName,
     date: new Date().toISOString().split('T')[0],
     day: dayOfWeek,
     start: startStr,
@@ -853,38 +698,23 @@ async function stopDay() {
     hours: parseFloat(hours.toFixed(2)),
     tasks: completedTasks,
     xp: dailyXp,
-    timePerTask: completedTasks > 0 ? parseFloat((hours / completedTasks).toFixed(2)) : hours
+    time_per_task: completedTasks > 0 ? parseFloat((hours / completedTasks).toFixed(2)) : hours
   };
-  // Optionally record LP change and current LP for non-placement games
   if (!isInPlacements) {
     const baselineForEntry = rankBaselines[rankIndex] || 200;
     const lpChangeForEntry = calculateLpChange(dailyXp, baselineForEntry);
-    historyEntry.lpChange = lpChangeForEntry;
-    historyEntry.lpAfter = lp;
+    historyEntry.lp_change = lpChangeForEntry;
+    historyEntry.lp_after = lp;
   } else {
-    historyEntry.lpChange = null;
-    historyEntry.lpAfter = null;
+    historyEntry.lp_change = null;
+    historyEntry.lp_after = null;
   }
-  // Persist history entry to Supabase before updating local copy
   try {
-    await sb.from('histories').insert({
-      username: currentUserName,
-      date: historyEntry.date,
-      day: historyEntry.day,
-      start: historyEntry.start,
-      end: historyEntry.end,
-      hours: historyEntry.hours,
-      tasks: historyEntry.tasks,
-      xp: historyEntry.xp,
-      time_per_task: historyEntry.timePerTask,
-      lp_change: historyEntry.lpChange ?? null,
-      lp_after: historyEntry.lpAfter ?? null
-    });
-  } catch {
-    // ignore insertion errors
+    await sb.from('histories').insert(historyEntry);
+  } catch (err) {
+    console.error('insert history error:', err);
   }
   history.push(historyEntry);
-  // Persist user data after updating history
   await saveUsers();
   updateAnalytics();
   // Reset state for next day
@@ -893,172 +723,114 @@ async function stopDay() {
   renderTasks();
   $('startBtn').disabled = false;
   $('stopBtn').disabled = true;
-  // Disable the pause button and reset its label
   const pauseButton = $('pauseBtn');
   if (pauseButton) {
     pauseButton.disabled = true;
     pauseButton.textContent = 'Pause';
   }
-  $('timerDisplay').textContent = `Completed in ${formatDuration(elapsedMs)}`;
 }
 
-// Toggle pause/resume for the current day. When the day is paused, timer updates stop
-// and the pause start time is recorded. When resumed, the time spent paused is
-// accumulated into pausedDuration.
-function togglePause() {
-  // Ignore if no day has started
-  if (!startedAt) return;
-  const pauseBtn = $('pauseBtn');
-  if (!isPaused) {
-    // Pausing: record the start time and stop the timer
-    pauseStartedAt = Date.now();
-    clearInterval(timerInterval);
-    isPaused = true;
-    if (pauseBtn) pauseBtn.textContent = 'Resume';
+// Update total XP and rank display
+function updateTotals() {
+  $('totalXp').textContent = totalXp;
+  const rankName = ranks[rankIndex]?.name || ranks[0].name;
+  $('rank').textContent = rankName;
+  updateProgressBar();
+  highlightRank();
+  const rankIcon = document.getElementById('currentRankIcon');
+  if (rankIcon) {
+    rankIcon.src = `emblems/${rankName.toLowerCase()}.png`;
+    rankIcon.alt = `${rankName} emblem`;
+  }
+  const curImg = document.getElementById('progressCurrentIcon');
+  const nextImg = document.getElementById('progressNextIcon');
+  if (isInPlacements) {
+    const curName = ranks[0].name.toLowerCase();
+    const nextName = ranks[1].name.toLowerCase();
+    if (curImg) curImg.src = `emblems/${curName}.png`;
+    if (nextImg) nextImg.src = `emblems/${nextName}.png`;
   } else {
-    // Resuming: accumulate the time spent paused and restart the timer
-    if (pauseStartedAt) {
-      pausedDuration += Date.now() - pauseStartedAt;
+    const curName = ranks[rankIndex].name.toLowerCase();
+    const nextName = rankIndex < ranks.length - 1 ? ranks[rankIndex + 1].name.toLowerCase() : ranks[rankIndex].name.toLowerCase();
+    if (curImg) curImg.src = `emblems/${curName}.png`;
+    if (nextImg) nextImg.src = `emblems/${nextName}.png`;
+  }
+  const placementsInfo = document.getElementById('placementsInfo');
+  const placementsCountEl = document.getElementById('placementsCount');
+  const lpInfo = document.getElementById('lpInfo');
+  const lpValueEl = document.getElementById('lpValue');
+  if (placementsInfo && placementsCountEl && lpInfo && lpValueEl) {
+    if (isInPlacements) {
+      placementsInfo.style.display = 'block';
+      lpInfo.style.display = 'none';
+      placementsCountEl.textContent = `${placementsPlayed} / ${placementsCount}`;
+    } else {
+      placementsInfo.style.display = 'none';
+      lpInfo.style.display = 'block';
+      lpValueEl.textContent = lp;
     }
-    pauseStartedAt = null;
-    timerInterval = setInterval(updateTimer, 500);
-    isPaused = false;
-    if (pauseBtn) pauseBtn.textContent = 'Pause';
-  }
-  // Keep stop button state in sync with tasks completion
-  checkCompletion();
-}
-
-// Add a new task
-function addTask() {
-  const title = $('taskInput').value.trim();
-  if (!title) return;
-  tasks.push({ title, done: false });
-  $('taskInput').value = '';
-  renderTasks();
-  // If the day hasn’t started, show the number of planned tasks
-  if (!startedAt) {
-    $('timerDisplay').textContent = `Planned tasks: ${tasks.length}`;
   }
 }
 
-// Change the current page in the analytics table. Positive delta moves
-// forward to older entries (higher page index), negative delta moves
-// back to more recent entries. The page index is clamped within valid range.
-function changeHistoryPage(delta) {
-  const pageCount = Math.ceil(history.length / historyPageSize);
-  if (pageCount <= 0) return;
-  historyPageIndex += delta;
-  if (historyPageIndex < 0) historyPageIndex = 0;
-  if (historyPageIndex >= pageCount) historyPageIndex = pageCount - 1;
-  updateAnalytics();
-}
-
-// Export the full analytics history to a CSV file. Creates a CSV
-// string with headers and data, then triggers a download in the browser.
-function exportCsv() {
-  if (!history || history.length === 0) {
-    alert('No history to export.');
-    return;
+// Update the progress bar width based on current total XP or LP
+function updateProgressBar() {
+  const progressBar = $('progressBar');
+  if (!progressBar) return;
+  let pct;
+  if (isInPlacements) {
+    pct = (placementsPlayed / placementsCount) * 100;
+    progressBar.title = `${Math.floor(pct)}% of placements completed`;
+  } else {
+    pct = (lp / 100) * 100;
+    const nextName = rankIndex < ranks.length - 1 ? ranks[rankIndex + 1].name : ranks[rankIndex].name;
+    progressBar.title = `${Math.floor(pct)}% toward ${nextName}`;
   }
-  const headers = ['Date','Day','Start','End','Hours','Tasks','XP','TimePerTask','LPChange','LPAfter'];
-  const lines = [];
-  lines.push(headers.join(','));
-  history.forEach((entry) => {
-    const row = [
-      entry.date,
-      entry.day || '',
-      entry.start || '',
-      entry.end || '',
-      entry.hours,
-      entry.tasks,
-      entry.xp,
-      entry.timePerTask,
-      entry.lpChange != null ? entry.lpChange : '',
-      entry.lpAfter != null ? entry.lpAfter : ''
-    ];
-    lines.push(row.join(','));
-  });
-  const csvContent = lines.join('\n');
-  const blob = new Blob([csvContent], { type: 'text/csv' });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement('a');
-  link.href = url;
-  link.download = 'ranked_work_history.csv';
-  document.body.appendChild(link);
-  link.click();
-  document.body.removeChild(link);
-  URL.revokeObjectURL(url);
+  progressBar.style.width = Math.max(0, Math.min(100, pct)) + '%';
 }
 
-// Update analytics table and summary statistics
+// Compute analytics summary and render history table
 function updateAnalytics() {
-  const tableBody = document.querySelector('#historyTable tbody');
-  if (!tableBody) return;
-  tableBody.innerHTML = '';
-  // Calculate pagination information
+  const tbody = document.querySelector('#historyTable tbody');
+  if (!tbody) return;
+  tbody.innerHTML = '';
+  // Pagination
   const pageCount = Math.ceil(history.length / historyPageSize);
-  if (historyPageIndex < 0) historyPageIndex = 0;
-  if (historyPageIndex >= pageCount) historyPageIndex = pageCount - 1;
-  // Determine the slice of history to display for the current page (newest entries first)
-  const end = history.length - historyPageIndex * historyPageSize;
-  const start = Math.max(0, end - historyPageSize);
-  const pageEntries = history.slice(start, end).reverse();
-  // Render only the entries for this page
+  const startIndex = history.length - (historyPageIndex + 1) * historyPageSize;
+  const endIndex = startIndex + historyPageSize;
+  const pageEntries = history.slice(Math.max(0, startIndex), Math.max(0, endIndex)).reverse();
   pageEntries.forEach((entry) => {
     const tr = document.createElement('tr');
-    const tdDate = document.createElement('td');
-    tdDate.textContent = entry.date;
-    // Day of week cell
-    const tdDay = document.createElement('td');
-    tdDay.textContent = entry.day || '';
-    // Start and end time cells
-    const tdStart = document.createElement('td');
-    tdStart.textContent = entry.start || '';
-    const tdEnd = document.createElement('td');
-    tdEnd.textContent = entry.end || '';
-    const tdHours = document.createElement('td');
-    tdHours.textContent = entry.hours.toString();
-    const tdTasks = document.createElement('td');
-    tdTasks.textContent = entry.tasks.toString();
-    const tdXp = document.createElement('td');
-    tdXp.textContent = entry.xp.toString();
-    const tdTPT = document.createElement('td');
-    tdTPT.textContent = entry.timePerTask.toString();
-    tr.appendChild(tdDate);
-    tr.appendChild(tdDay);
-    tr.appendChild(tdStart);
-    tr.appendChild(tdEnd);
-    tr.appendChild(tdHours);
-    tr.appendChild(tdTasks);
-    tr.appendChild(tdXp);
-    tr.appendChild(tdTPT);
-    tableBody.appendChild(tr);
+    function td(text) {
+      const cell = document.createElement('td');
+      cell.textContent = text;
+      return cell;
+    }
+    tr.appendChild(td(entry.date));
+    tr.appendChild(td(entry.day));
+    tr.appendChild(td(entry.start));
+    tr.appendChild(td(entry.end));
+    tr.appendChild(td(entry.hours));
+    tr.appendChild(td(entry.tasks));
+    tr.appendChild(td(entry.xp));
+    tr.appendChild(td(entry.time_per_task));
+    tbody.appendChild(tr);
   });
-  // Compute averages across all history
-  let totalHours = 0;
-  let totalTasks = 0;
-  history.forEach((entry) => {
-    totalHours += entry.hours;
-    totalTasks += entry.tasks;
-  });
+  // Compute summary statistics
+  const totalHours = history.reduce((acc, e) => acc + (e.hours || 0), 0);
+  const totalTasks = history.reduce((acc, e) => acc + (e.tasks || 0), 0);
+  const totalTimePerTask = history.reduce((acc, e) => acc + (e.time_per_task || 0), 0);
   const count = history.length;
-  const avgHours = count > 0 ? (totalHours / count).toFixed(2) : '0';
-  const avgTasks = count > 0 ? (totalTasks / count).toFixed(2) : '0';
-  const avgTimePerTask = totalTasks > 0 ? (totalHours / totalTasks).toFixed(2) : '0';
-  // Update summary
-  const avgHoursEl = document.getElementById('avgHours');
-  const avgTasksEl = document.getElementById('avgTasks');
-  const avgTimeEl = document.getElementById('avgTimePerTask');
-  if (avgHoursEl) avgHoursEl.textContent = avgHours;
-  if (avgTasksEl) avgTasksEl.textContent = avgTasks;
-  if (avgTimeEl) avgTimeEl.textContent = avgTimePerTask;
-  // Update navigation controls: page indicator and button states
+  const avgHours = count ? (totalHours / count).toFixed(2) : '0';
+  const avgTasks = count ? (totalTasks / count).toFixed(2) : '0';
+  const avgTimePerTask = count ? (totalTimePerTask / count).toFixed(2) : '0';
+  $('avgHours').textContent = avgHours;
+  $('avgTasks').textContent = avgTasks;
+  $('avgTimePerTask').textContent = avgTimePerTask;
+  // Update pagination controls
   const pageInfoEl = $('historyPageInfo');
   const prevBtn = $('prevHistoryPage');
   const nextBtn = $('nextHistoryPage');
   if (pageInfoEl) {
-    // Page numbers are 1-based for display
     pageInfoEl.textContent = pageCount > 0 ? `Page ${historyPageIndex + 1} / ${pageCount}` : '';
   }
   if (prevBtn) {
@@ -1069,43 +841,104 @@ function updateAnalytics() {
   }
 }
 
-// Bind event listeners once the DOM has loaded
+// Change history page; direction +1 moves backward (older), -1 forward (newer)
+function changeHistoryPage(direction) {
+  const pageCount = Math.ceil(history.length / historyPageSize);
+  historyPageIndex = Math.min(Math.max(historyPageIndex + direction, 0), Math.max(pageCount - 1, 0));
+  updateAnalytics();
+}
+
+// Export history as CSV
+function exportCsv() {
+  if (!history || history.length === 0) {
+    alert('No history to export.');
+    return;
+  }
+  const header = ['Date', 'Day', 'Start', 'End', 'Hours', 'Tasks', 'XP', 'Time/Task'];
+  const rows = history.map((e) => [
+    e.date,
+    e.day,
+    e.start,
+    e.end,
+    e.hours,
+    e.tasks,
+    e.xp,
+    e.time_per_task
+  ]);
+  let csvContent = header.join(',') + '\n';
+  rows.forEach((row) => {
+    csvContent += row.join(',') + '\n';
+  });
+  const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'history.csv';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+// ------------------------------------------------------------
+// Event bindings and initialization
+// ------------------------------------------------------------
+
 window.addEventListener('DOMContentLoaded', async () => {
   // Populate static tables
   populateTables();
-  updateTotals();
-  updateAnalytics();
-  // Attempt to restore session via Supabase auth
+  // Attempt to restore Supabase session
   try {
     const { data: { user } } = await sb.auth.getUser();
-    if (user && user.email) {
+    if (user) {
       currentUserName = user.email;
-      await loadUserStateAsync(user.email);
+      await loadUserState(currentUserName);
       showApp();
     } else {
       showLogin();
     }
-  } catch {
+  } catch (err) {
+    console.error('getUser error:', err);
     showLogin();
   }
+  updateTotals();
+  updateAnalytics();
   // Task controls
-  $('addTaskBtn').addEventListener('click', addTask);
-  // Allow pressing Enter in the task input to add a new task
+  const addTaskBtn = $('addTaskBtn');
+  if (addTaskBtn) addTaskBtn.addEventListener('click', () => {
+    const input = $('taskInput');
+    if (!input) return;
+    const title = input.value.trim();
+    if (title) {
+      tasks.push({ title: title, done: false });
+      input.value = '';
+      renderTasks();
+      if (!startedAt) {
+        $('timerDisplay').textContent = `Planned tasks: ${tasks.length}`;
+      }
+    }
+  });
   const taskInputEl = $('taskInput');
   if (taskInputEl) {
     taskInputEl.addEventListener('keydown', (event) => {
       if (event.key === 'Enter') {
         event.preventDefault();
-        addTask();
+        const title = taskInputEl.value.trim();
+        if (title) {
+          tasks.push({ title: title, done: false });
+          taskInputEl.value = '';
+          renderTasks();
+          if (!startedAt) {
+            $('timerDisplay').textContent = `Planned tasks: ${tasks.length}`;
+          }
+        }
       }
     });
   }
   $('startBtn').addEventListener('click', startDay);
   $('stopBtn').addEventListener('click', stopDay);
   const pauseBtnEl = $('pauseBtn');
-  if (pauseBtnEl) {
-    pauseBtnEl.addEventListener('click', togglePause);
-  }
+  if (pauseBtnEl) pauseBtnEl.addEventListener('click', togglePause);
   $('resetBtn').addEventListener('click', resetProgress);
   // Pagination and export controls
   const prevBtn = $('prevHistoryPage');
@@ -1123,7 +956,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     loginBtn.addEventListener('click', async () => {
       const username = $('usernameInput').value;
       const password = $('passwordInput').value;
-      const success = await loginUserAsync(username, password);
+      const success = await loginUser(username, password);
       const errorEl = $('loginError');
       if (success) {
         $('usernameInput').value = '';
@@ -1132,7 +965,7 @@ window.addEventListener('DOMContentLoaded', async () => {
         showApp();
         updateTotals();
         updateAnalytics();
-        await renderFriendsAsync();
+        await renderFriends();
       } else {
         if (errorEl) {
           errorEl.textContent = 'Invalid username or password.';
@@ -1145,7 +978,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     registerBtn.addEventListener('click', async () => {
       const username = $('usernameInput').value;
       const password = $('passwordInput').value;
-      const success = await registerUserAsync(username, password);
+      const success = await registerUser(username, password);
       const errorEl = $('loginError');
       if (success) {
         $('usernameInput').value = '';
@@ -1155,7 +988,7 @@ window.addEventListener('DOMContentLoaded', async () => {
         showApp();
         updateTotals();
         updateAnalytics();
-        await renderFriendsAsync();
+        await renderFriends();
       } else {
         if (errorEl) {
           errorEl.textContent = 'Username already exists or invalid.';
@@ -1166,17 +999,12 @@ window.addEventListener('DOMContentLoaded', async () => {
   }
   if (signOutBtn) {
     signOutBtn.addEventListener('click', async () => {
-      try {
-        await sb.auth.signOut();
-      } catch {
-        // ignore sign out errors
-      }
       await logoutUser();
     });
   }
   if (addFriendBtn) {
     addFriendBtn.addEventListener('click', async () => {
-      await addFriendAsync();
+      await addFriend();
     });
   }
 });
